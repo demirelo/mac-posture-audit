@@ -1,0 +1,19 @@
+# Reports — these may contain sensitive paths, never commit.
+gitleaks-report.json
+gitleaks-*.json
+*.report.json
+posture-*.json
+posture-*.txt
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+.claude/
+*.swp
+*~
+
+# Backups
+*.backup
+*.backup-*
+*.bak

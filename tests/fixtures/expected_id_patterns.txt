@@ -1,0 +1,4 @@
+# Regex patterns for templated IDs whose suffix is derived from item names
+# detected at runtime (one row emitted per detected item).
+^network\.sharing\.[a-z0-9_]+$
+^persist\.system\.[a-z0-9_]+$

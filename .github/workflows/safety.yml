@@ -1,0 +1,83 @@
+name: Safety
+
+on:
+  push:
+  pull_request:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  read-only-audit:
+    name: Read-only audit checks
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install test tools
+        run: brew install bats-core shellcheck shfmt
+
+      - name: Bash syntax
+        run: bash -n mac-posture-audit.sh
+
+      - name: ShellCheck
+        run: shellcheck -S warning mac-posture-audit.sh scripts/check-read-only.sh tests/helpers.bash
+
+      - name: shfmt diff
+        run: shfmt -d -i 2 mac-posture-audit.sh scripts/check-read-only.sh tests/helpers.bash
+
+      - name: Read-only safety tripwire
+        run: ./scripts/check-read-only.sh
+
+      - name: Tripwire negative tests
+        run: |
+          fail=0
+          for f in tests/check-read-only/should_pass/*.sh; do
+            if ! ./scripts/check-read-only.sh "$f" >/dev/null 2>&1; then
+              echo "::error file=$f::tripwire rejected a fixture that should be accepted"
+              fail=1
+            fi
+          done
+          for f in tests/check-read-only/should_fail/*.sh; do
+            if ./scripts/check-read-only.sh "$f" >/dev/null 2>&1; then
+              echo "::error file=$f::tripwire failed to reject this fixture"
+              fail=1
+            fi
+          done
+          [[ "$fail" -eq 0 ]]
+
+      - name: Bats test suite
+        run: bats tests/sections tests/integration
+
+      - name: JSON smoke test
+        run: |
+          set +e
+          ./mac-posture-audit.sh --json --quick --redact > posture.json
+          status=$?
+          set -e
+          if [[ "$status" -ne 0 && "$status" -ne 1 ]]; then
+            echo "Unexpected script exit status: $status" >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+
+          d = json.load(open("posture.json"))
+          s = d["summary"]
+          assert s["pass"] + s["warn"] + s["fail"] + s["skip"] == len(d["results"]), (
+              s,
+              len(d["results"]),
+          )
+          assert d["host"] == "<HOST>", d["host"]
+          assert all(r["status"] in ("pass", "warn", "fail", "skip") for r in d["results"])
+          assert all({"id", "status", "label", "hint"} <= set(r) for r in d["results"])
+          ids = [r["id"] for r in d["results"]]
+          assert all(ids), "every row must carry a non-empty id"
+          assert len(ids) == len(set(ids)), "ids must be unique within a single run"
+          PY
+
+      - name: Schema validator (stdlib)
+        run: python3 tests/lib/validate_schema.py posture.json

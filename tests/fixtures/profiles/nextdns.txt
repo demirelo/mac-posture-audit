@@ -1,0 +1,2 @@
+_computerlevel[1] attribute: name: NextDNS
+PayloadType = com.apple.dnsSettings.managed

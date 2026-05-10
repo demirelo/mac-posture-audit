@@ -1,0 +1,5 @@
+DNS configuration
+
+resolver #1
+  nameserver[0] : 1.1.1.1
+  nameserver[1] : 9.9.9.9

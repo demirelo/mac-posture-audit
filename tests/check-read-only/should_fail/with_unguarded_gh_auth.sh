@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+exit 0
+# Tripwire bait below; never executed. `gh auth status` may contact GitHub
+# depending on gh version/config, so it must stay behind the NETWORK guard.
+gh auth status

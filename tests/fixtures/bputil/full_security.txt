@@ -1,0 +1,2 @@
+Security Mode: Full Security
+3rd Party Kexts Status: Disabled
