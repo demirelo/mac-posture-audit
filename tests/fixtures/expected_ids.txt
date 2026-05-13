@@ -1,3 +1,4 @@
+apps.remote_access.present
 av.browser.antitracker
 av.browser.malwarebytes
 av.browser.trafficlight
@@ -16,6 +17,7 @@ boot.kexts.disabled
 boot.secure.full
 browser.default
 browser.installed
+cloud.icloud.desktop_documents_sync
 cred.aws.creds
 cred.docker.auth
 cred.gitconfig.embedded
@@ -86,6 +88,7 @@ privacy.diagnostics.off
 privacy.lockdown.on
 privacy.screenshot.location
 pwmgr.running
+sandbox.runtime.present
 ssh.agent.1password
 ssh.authsock
 ssh.config.identityagent

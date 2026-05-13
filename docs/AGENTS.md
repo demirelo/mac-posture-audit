@@ -62,7 +62,9 @@ These are pairs/triples of rows that are individually low-signal or `skip`/`warn
 | 3.8 | Identity confusion | — | agent-only (needs external context) |
 | 3.9 | Two AVs running | `av.engine.conflict` | ✅ baked in (existing) |
 | 3.10 | FIDO2 gap with hardware wallet present | `twofa.fido_gap` | ✅ baked in |
-| 3.11 | Cloud-sync exfiltration | `data.ssh.cloud_sync_exposure` + `data.crypto.cloud_sync_exposure` + `data.dotfiles.cloud_sync_exposure` | ✅ baked in (per-domain) |
+| 3.11 | iCloud blast radius | `cloud.icloud.desktop_documents_sync` + `data.*.cloud_sync_exposure` | ✅ baked in (per-check) |
+| 3.12 | Remote-access crypto-theft surface | `apps.remote_access.present` + `tcc.holders` + `ext.wallet` | ✅ baked in (per-check) |
+| 3.13 | Cloud-sync exfiltration | `data.ssh.cloud_sync_exposure` + `data.crypto.cloud_sync_exposure` + `data.dotfiles.cloud_sync_exposure` | ✅ baked in (per-domain) |
 
 ### 3.1 Encrypted-DNS gap → `network.dns.encrypted`
 
@@ -115,7 +117,23 @@ Already an explicit row. Two real-time engines fight over hooks and miss things.
 
 Combines `wallet.hw.installed` + `twofa.hardware.installed`. If the user has Ledger / Trezor but no YubiKey, the same hardware wallet usually ships a FIDO2 companion app — free upgrade for account 2FA on 1Password / GitHub / exchanges. Skip-with-nudge.
 
-### 3.11 Cloud-sync exfiltration → `data.ssh.cloud_sync_exposure` + `data.crypto.cloud_sync_exposure` + `data.dotfiles.cloud_sync_exposure`
+### 3.11 iCloud blast radius → `cloud.icloud.desktop_documents_sync` + `data.*.cloud_sync_exposure`
+
+`cloud.icloud.desktop_documents_sync` detects Apple's "Desktop & Documents Folders" feature, which silently redirects `~/Desktop` and `~/Documents` into `~/Library/Mobile Documents/com~apple~CloudDocs/`. Anything the user saves to Desktop or Documents is then uploaded to iCloud and replicated to every signed-in device. Without Advanced Data Protection on, Apple holds the keys.
+
+When this fires alongside any of the `data.*.cloud_sync_exposure` checks, do not treat them as separate findings. The composite story is: the user's home directory has effectively been turned into an iCloud-synced volume, and sensitive subdirectories underneath inherit that exposure. Surface as a single recommendation: turn the feature off, or (if the user wants it on for low-sensitivity work) move sensitive subdirs out of `~/Documents` and `~/Desktop` first.
+
+### 3.12 Remote-access crypto-theft surface → `apps.remote_access.present` + TCC sensitive holders + `ext.wallet`
+
+`apps.remote_access.present` is the ClickFake / "fake interview" pattern's first move: attacker tricks the target into installing AnyDesk / TeamViewer "for a screen-share interview," gets them to grant Accessibility + Screen Recording, then drains wallets via the browser extension. The audit reports the three components as separate rows:
+
+- `apps.remote_access.present` (warn / fail under `web3` + `paranoid`) — is the tool installed at all?
+- `tcc.holders` (skip with sensitive-service breakdown) — have any clients been granted Accessibility / Screen Recording?
+- `ext.wallet` (warn / fail under `web3` + `paranoid`) — is there a wallet extension on the same machine?
+
+When all three fire together, the user has the exact configuration the attack relies on. Recommend: uninstall the remote-access app, revoke its TCC grants explicitly (System Settings → Privacy & Security → Accessibility + Screen Recording), then audit `ext.wallet` for any extension you didn't install yourself in the last 24 hours.
+
+### 3.13 Cloud-sync exfiltration → `data.ssh.cloud_sync_exposure` + `data.crypto.cloud_sync_exposure` + `data.dotfiles.cloud_sync_exposure`
 
 iCloud Drive, Dropbox, Google Drive, OneDrive, and Box all silently replicate whatever lives under their root to every other device on the same account — and to the provider's servers. When a sensitive directory ends up under one of those roots (because the user moved their home, symlinked `~/.ssh`, or enabled "Desktop & Documents Folders" in iCloud), the threat model collapses: a compromise of any *other* signed-in device or of the provider's storage leaks the secret.
 
@@ -138,6 +156,7 @@ The audit emits a lot of rows that look concerning until you understand the cont
 - `cred.gitleaks.hint: skip` — Hint to install gitleaks, not a finding.
 - `2fa.hardware.installed: skip` (with Ledger present) — The hint already says Ledger covers FIDO2.
 - `network.dns.resolvers: skip` — Pure informational dump of DNS server IPs.
+- `sandbox.runtime.present: skip` — Always a `skip`. Present means "you have Docker / OrbStack / UTM available, use it for untrusted code." Absent means "consider installing one." Neither state is a finding; don't surface as a gap.
 - Single high `ext.total.count` — Browser extension count alone isn't actionable without knowing the contents.
 - `browser.installed` informational — Counts and reports, doesn't fail.
 

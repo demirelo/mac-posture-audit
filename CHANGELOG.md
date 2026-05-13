@@ -10,30 +10,45 @@ All notable changes to this project will be documented in this file.
 - **`data.ssh.cloud_sync_exposure`** (Section 17) — iterates over `~/.ssh`, `~/.aws`, `~/.kube`, `~/.gnupg`; resolves real path via `cd + pwd -P` so symlinks into cloud-sync roots are caught; calls `_path_in_cloud_root`; **fails by default** (no profile escalation needed — uploading SSH keys to iCloud Drive / Dropbox / etc. is recoverable by anyone with cloud-account access and defeats key passphrases since the encrypted form is offline-brute-forceable). Provider name (iCloud Drive / Dropbox / Google Drive / OneDrive / Box / generic File Provider) is included in the label.
 - **`data.crypto.cloud_sync_exposure`** (Section 17) — same pattern against wallet application-support dirs: Ledger Live, Trezor Suite, Electrum, Sparrow, Bitcoin, plus `~/Library/Ethereum` and `~/.ethereum`. Wallet metadata, watch-only descriptors, and (for some wallets) encrypted seed material live in these dirs. Default `warn`; `web3` and `paranoid` profiles escalate to `fail`.
 - **`data.dotfiles.cloud_sync_exposure`** (Section 17) — covers `~/.gitconfig`, `~/.zshrc`, `~/.bashrc`, `~/.zprofile`, `~/.profile`, `~/.netrc`, `~/.pypirc`, `~/.npmrc`, `~/.cargo/credentials`, `~/.gem/credentials`. Files (not directories), so resolution is via parent's `pwd -P` + basename to catch symlinks. Complements Section 14 credential-pattern detection on the *location* axis: even unscanned secrets leak when these files are inside a cloud-sync root. Default `warn`.
+- **`apps.remote_access.present`** (Section 22) — detects AnyDesk, TeamViewer (+ Host), Splashtop (Business + Streamer), RustDesk, Chrome Remote Desktop, LogMeIn, GoToMyPC, ScreenConnect / ConnectWise Control, RealVNC, VNC Viewer, Parsec under `/Applications` and `~/Applications`. Closes the most common "fake interview" / ClickFake crypto-drainer playbook gap: attacker convinces target to install a remote-control app for a "screen-share interview," grants Accessibility + Screen Recording, drains wallets. Default `warn`; `web3` and `paranoid` profiles escalate to `fail`. App names are listed in the terminal label, redacted to a count under `--redact`. Brand list is overridable via `APP_ROOTS` env for tests.
+- **`sandbox.runtime.present`** (Section 22) — informational nudge. Detects Docker.app, OrbStack.app, UTM.app, Parallels Desktop, VMware Fusion (via app bundles) and Lima / Colima (via `command -v`). Emits `skip` either way: present gets a positive acknowledgement with a use-case hint ("use this for untrusted npm/pip packages"); absent gets a recommendation to install OrbStack or UTM. `SANDBOX_CLI_BINS` env is overridable for tests.
+- **`cloud.icloud.desktop_documents_sync`** (Section 19) — detects whether Apple's "Desktop & Documents Folders in iCloud Drive" feature is on by probing for `~/Library/Mobile Documents/com~apple~CloudDocs/Desktop` and `~/Library/Mobile Documents/com~apple~CloudDocs/Documents` as real directories. When on, every file on the user's Desktop or in Documents is uploaded to iCloud and replicated to every signed-in device — a major blast-radius expander, especially when the user drags wallet seed material, tax docs, or `Vault.sparsebundle` to the Desktop "temporarily." Default `warn`; surfaces *which* folders are redirected.
 
 ### Profile overrides
 
 - `web3 | data.crypto.cloud_sync_exposure | warn → fail`
 - `paranoid | data.crypto.cloud_sync_exposure | warn → fail`
 - `paranoid | backup.tm.encrypted | warn → fail`
+- `web3 | apps.remote_access.present | warn → fail`
+- `paranoid | apps.remote_access.present | warn → fail`
 
 ### Tests
 
 - New `tests/sections/17_folder_layout.bats` — 10 cases covering: no-finding baseline, SSH/AWS/kube/gnupg under iCloud, wallet-app-data under iCloud with default + web3 + paranoid severity, dotfiles under iCloud, downloads hygiene, vault sparsebundle detection. Uses an isolated `$HOME` inside `$BATS_TEST_TMPDIR` (`isolate_home` / `isolate_home_in_icloud` helpers in the file) so tests never touch real user dotfiles.
 - Five new `tests/sections/18_backups.bats` cases covering the four `backup.tm.encrypted` outcomes (pass / warn / skip-no-destination / skip-older-tmutil) plus a paranoid-profile escalation case.
+- Nine new `tests/sections/22_persistence_tcc.bats` cases — remote-access absence baseline, AnyDesk-only warn, TeamViewer+RustDesk multi-find, web3 + paranoid escalation to fail, label redaction under `--redact`; sandbox no-runtime nudge, OrbStack positive ack, Docker+UTM multi-list. All use a sandbox `APP_ROOTS` so detection doesn't depend on what's installed on the runner machine.
+- New `tests/sections/19_icloud.bats` — 5 cases for `cloud.icloud.desktop_documents_sync`: baseline pass, iCloud root present but no redirected folders (still pass), Desktop-only warn, Documents-only warn, both-redirected warn with combined label.
 
 ### Fixtures
 
 - `tests/fixtures/tmutil/destination_encrypted.txt` — `Encrypted : 1`
 - `tests/fixtures/tmutil/destination_unencrypted.txt` — `Encrypted : 0`
 
+### Test-only overrides
+
+- `APP_ROOTS` — array of directories to scan for risky/sandbox apps. Defaults to `/Applications $HOME/Applications` in production; bats sets it to a `$BATS_TEST_TMPDIR/apps` sandbox.
+- `SANDBOX_CLI_BINS` — array of CLI runtime binaries to probe via `command -v`. Defaults to `lima colima`; tests set to empty array to deterministically suppress lookups against the runner's `$PATH`.
+
 ### ID registry
 
-Four new entries in `tests/fixtures/expected_ids.txt`:
+Seven new entries in `tests/fixtures/expected_ids.txt`:
 - `backup.tm.encrypted`
 - `data.ssh.cloud_sync_exposure`
 - `data.crypto.cloud_sync_exposure`
 - `data.dotfiles.cloud_sync_exposure`
+- `apps.remote_access.present`
+- `sandbox.runtime.present`
+- `cloud.icloud.desktop_documents_sync`
 
 ## [0.1.0] - 2026-05-10
 

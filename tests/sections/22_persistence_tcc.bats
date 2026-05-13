@@ -265,3 +265,118 @@ esac'
   assert_recorded skip "TCC partial scan"
   [[ "${RESULTS_PASS[*]-}" != *"none in the most-sensitive list"* ]]
 }
+
+# ─── apps.remote_access.present ────────────────────────────────────────────
+# APP_ROOTS is overridable so we can scan a sandbox dir instead of
+# /Applications on the runner machine — otherwise the suite would
+# fail/pass based on whatever the developer happens to have installed.
+
+setup_app_roots_sandbox() {
+  TEST_APPS="$BATS_TEST_TMPDIR/apps"
+  mkdir -p "$TEST_APPS"
+  APP_ROOTS=("$TEST_APPS")
+  export APP_ROOTS
+}
+
+@test "remote-access apps absent — passes" {
+  setup_app_roots_sandbox
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded pass "No known remote-access apps installed"
+}
+
+@test "AnyDesk installed — warns by default" {
+  setup_app_roots_sandbox
+  mkdir -p "$TEST_APPS/AnyDesk.app"
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded warn "Remote-access app(s) installed: AnyDesk"
+}
+
+@test "TeamViewer + RustDesk — both surfaced in label" {
+  setup_app_roots_sandbox
+  mkdir -p "$TEST_APPS/TeamViewer.app"
+  mkdir -p "$TEST_APPS/RustDesk.app"
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded warn "TeamViewer"
+  [[ "${RESULTS_WARN[*]}" == *"RustDesk"* ]]
+}
+
+@test "AnyDesk installed — web3 profile escalates to fail" {
+  setup_app_roots_sandbox
+  mkdir -p "$TEST_APPS/AnyDesk.app"
+  PROFILE="web3"
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded fail "Remote-access app(s) installed"
+}
+
+@test "AnyDesk installed — paranoid profile escalates to fail" {
+  setup_app_roots_sandbox
+  mkdir -p "$TEST_APPS/AnyDesk.app"
+  PROFILE="paranoid"
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded fail "Remote-access app(s) installed"
+}
+
+@test "remote-access app names redacted under --redact" {
+  setup_app_roots_sandbox
+  mkdir -p "$TEST_APPS/AnyDesk.app"
+  REDACT=true
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  [[ "${RESULTS_WARN[*]}" != *"AnyDesk"* ]]
+  [[ "${RESULTS_WARN[*]}" == *"1 found"* ]]
+}
+
+# ─── sandbox.runtime.present ───────────────────────────────────────────────
+
+@test "no sandbox runtime installed — skip with nudge to install one" {
+  setup_app_roots_sandbox
+  # Disable CLI runtime lookups deterministically — we don't want the
+  # outcome to depend on whether the test runner has lima/colima in $PATH.
+  SANDBOX_CLI_BINS=()
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded skip "No sandbox runtime installed"
+}
+
+@test "OrbStack installed — skip with positive acknowledgement" {
+  setup_app_roots_sandbox
+  SANDBOX_CLI_BINS=()
+  mkdir -p "$TEST_APPS/OrbStack.app"
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded skip "Sandbox runtime(s) available: OrbStack"
+}
+
+@test "Docker + UTM — both listed" {
+  setup_app_roots_sandbox
+  SANDBOX_CLI_BINS=()
+  mkdir -p "$TEST_APPS/Docker.app"
+  mkdir -p "$TEST_APPS/UTM.app"
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded skip "Docker"
+  [[ "${RESULTS_SKIP[*]}" == *"UTM"* ]]
+}

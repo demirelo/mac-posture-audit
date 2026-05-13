@@ -210,6 +210,7 @@ PROFILE_OVERRIDES=(
   "web3|ssh.keys.unencrypted|warn|fail"
   "web3|ext.simulator.advice|warn|fail"
   "web3|data.crypto.cloud_sync_exposure|warn|fail"
+  "web3|apps.remote_access.present|warn|fail"
   # paranoid — high-threat user; lock down everything.
   "paranoid|ext.wallet|warn|fail"
   "paranoid|supply.npm.ignorescripts|warn|fail"
@@ -224,6 +225,7 @@ PROFILE_OVERRIDES=(
   "paranoid|backup.tm.recency|warn|fail"
   "paranoid|backup.tm.encrypted|warn|fail"
   "paranoid|data.crypto.cloud_sync_exposure|warn|fail"
+  "paranoid|apps.remote_access.present|warn|fail"
   "paranoid|update.auto|warn|fail"
   "paranoid|cred.docker.auth|warn|fail"
   # developer — supply chain matters; wallet-warn keeps default semantic.
@@ -2724,6 +2726,26 @@ section_19_icloud() {
   # Advanced Data Protection — not readable from CLI without private API
   skip "iCloud Advanced Data Protection (ADP) state" "Verify manually: Settings → Apple ID → iCloud → Advanced Data Protection should show 'On'" "icloud.adp"
 
+  # "Desktop & Documents Folders" → iCloud Drive.
+  # When enabled, ~/Desktop and ~/Documents are redirected into
+  # ~/Library/Mobile Documents/com~apple~CloudDocs/. Anything saved there
+  # (downloaded PDFs, screenshots, ad-hoc notes containing seed phrases,
+  # transaction CSVs, the Vault.sparsebundle the user dragged to Desktop
+  # "temporarily") is uploaded and replicated to every signed-in device.
+  # On a wallet-holding Mac this is a major blast-radius expander.
+  # Detection: the redirected folders exist as real directories under
+  # the iCloud Drive root only when the feature is on.
+  DDS_DESKTOP="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Desktop"
+  DDS_DOCS="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Documents"
+  if [[ -d "$DDS_DESKTOP" || -d "$DDS_DOCS" ]]; then
+    DDS_WHICH=()
+    [[ -d "$DDS_DESKTOP" ]] && DDS_WHICH+=("Desktop")
+    [[ -d "$DDS_DOCS" ]] && DDS_WHICH+=("Documents")
+    warn "iCloud 'Desktop & Documents Folders' sync is on (${DDS_WHICH[*]})" "Everything you drop on the Desktop or save to Documents is uploaded to iCloud and replicated to every other device signed in to your Apple ID. Without Advanced Data Protection, Apple holds the keys. Trade-off acceptable for low-sensitivity work; risky for wallet seeds, tax docs, key material. Disable: System Settings → Apple ID → iCloud → iCloud Drive → 'Desktop & Documents Folders' off." "cloud.icloud.desktop_documents_sync"
+  else
+    pass "iCloud Desktop & Documents Folders sync is off" "cloud.icloud.desktop_documents_sync"
+  fi
+
 }
 
 section_20_users_sudo() {
@@ -3026,6 +3048,101 @@ section_22_persistence_tcc() {
         fi
       fi
     fi
+  fi
+
+  # Remote-access app presence.
+  # AnyDesk, TeamViewer, et al. are the literal playbook for the "fake
+  # interview" / ClickFake crypto-drainer pattern: attacker convinces target
+  # to install AnyDesk for a "screen-share interview," grants Accessibility
+  # + Screen Recording, drains wallets. Legitimate sysadmins do use these,
+  # so default is `warn`; web3 and paranoid profiles escalate to `fail`
+  # because there's no scenario where a wallet-holding Mac should also be
+  # an inbound remote-control target.
+  REMOTE_ACCESS_APPS=(
+    "AnyDesk.app"
+    "TeamViewer.app"
+    "TeamViewerHost.app"
+    "Splashtop Business.app"
+    "Splashtop Streamer.app"
+    "RustDesk.app"
+    "Chrome Remote Desktop Host.app"
+    "ChromeRemoteDesktopHost.app"
+    "LogMeIn.app"
+    "LogMeIn Client.app"
+    "GoToMyPC.app"
+    "ScreenConnect.app"
+    "ConnectWiseControl.app"
+    "RealVNC.app"
+    "VNC Viewer.app"
+    "Parsec.app"
+  )
+  # APP_ROOTS is overridable for tests so we can point at a sandbox $HOME
+  # without depending on /Applications on the runner machine. In production
+  # both paths are scanned.
+  if [[ -z "${APP_ROOTS+set}" ]]; then
+    APP_ROOTS=("/Applications" "$HOME/Applications")
+  fi
+  REMOTE_ACCESS_FOUND=()
+  for app in "${REMOTE_ACCESS_APPS[@]}"; do
+    for root in "${APP_ROOTS[@]}"; do
+      if [[ -d "$root/$app" ]]; then
+        REMOTE_ACCESS_FOUND+=("${app%.app}")
+        break
+      fi
+    done
+  done
+  if [[ ${#REMOTE_ACCESS_FOUND[@]} -gt 0 ]]; then
+    if [[ "$REDACT" == "true" ]]; then
+      warn "Remote-access app(s) installed: ${#REMOTE_ACCESS_FOUND[@]} found" "Remote-control tools (AnyDesk / TeamViewer / etc.) are central to crypto-drainer playbooks: attacker tricks user into installing one and granting Accessibility + Screen Recording. If you don't actively use these for sysadmin work, uninstall." "apps.remote_access.present"
+    else
+      warn "Remote-access app(s) installed: ${REMOTE_ACCESS_FOUND[*]}" "Remote-control tools (AnyDesk / TeamViewer / etc.) are central to crypto-drainer playbooks: attacker tricks user into installing one and granting Accessibility + Screen Recording. If you don't actively use these for sysadmin work, uninstall. Also revoke any stale TCC grants (System Settings → Privacy & Security → Accessibility / Screen Recording)." "apps.remote_access.present"
+    fi
+  else
+    pass "No known remote-access apps installed" "apps.remote_access.present"
+  fi
+
+  # Sandbox runtime presence — informational nudge.
+  # Having Docker / OrbStack / UTM available means the user has a ready
+  # sandbox for "I want to try this random npm/pip/curl-pipe-bash but not
+  # on my host." We don't penalise either state; absence gets a hint to
+  # consider one, presence gets a pat-on-the-back without false confidence.
+  SANDBOX_RUNTIMES=(
+    "Docker.app"
+    "OrbStack.app"
+    "UTM.app"
+    "Parallels Desktop.app"
+    "VMware Fusion.app"
+  )
+  SANDBOX_FOUND=()
+  for app in "${SANDBOX_RUNTIMES[@]}"; do
+    for root in "${APP_ROOTS[@]}"; do
+      if [[ -d "$root/$app" ]]; then
+        SANDBOX_FOUND+=("${app%.app}")
+        break
+      fi
+    done
+  done
+  # CLI-only runtimes — check $PATH lookups, not file globs. Overridable
+  # for tests; empty array under tests yields the "no sandbox" path
+  # deterministically.
+  if [[ -z "${SANDBOX_CLI_BINS+set}" ]]; then
+    SANDBOX_CLI_BINS=("lima" "colima")
+  fi
+  # bash 3.2 errors on empty-array @-expansion under set -u; the :+ guard
+  # collapses to nothing when the array has zero elements.
+  for bin in ${SANDBOX_CLI_BINS[@]+"${SANDBOX_CLI_BINS[@]}"}; do
+    if command -v "$bin" >/dev/null 2>&1; then
+      SANDBOX_FOUND+=("$bin")
+    fi
+  done
+  if [[ ${#SANDBOX_FOUND[@]} -gt 0 ]]; then
+    if [[ "$REDACT" == "true" ]]; then
+      skip "Sandbox runtime(s) available: ${#SANDBOX_FOUND[@]} found" "Use them for unfamiliar npm/pip packages, untrusted scripts, and pre-merge testing of dependencies. A container or VM is the cheapest blast-radius cut on macOS." "sandbox.runtime.present"
+    else
+      skip "Sandbox runtime(s) available: ${SANDBOX_FOUND[*]}" "Use them for unfamiliar npm/pip packages, untrusted scripts, and pre-merge testing of dependencies. A container or VM is the cheapest blast-radius cut on macOS." "sandbox.runtime.present"
+    fi
+  else
+    skip "No sandbox runtime installed (Docker / OrbStack / UTM)" "Consider installing OrbStack (lightweight Docker alternative) or UTM (full VM) for testing untrusted packages without polluting the host." "sandbox.runtime.present"
   fi
 }
 
