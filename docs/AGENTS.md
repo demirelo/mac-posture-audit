@@ -67,6 +67,12 @@ These are pairs/triples of rows that are individually low-signal or `skip`/`warn
 | 3.13 | Cloud-sync exfiltration | `data.ssh.cloud_sync_exposure` + `data.crypto.cloud_sync_exposure` + `data.dotfiles.cloud_sync_exposure` | ✅ baked in (per-domain) |
 | 3.14 | IDE malicious-repo auto-run | `ide.vscode.workspace_trust` + `ide.cursor.workspace_trust` | ✅ baked in (per-IDE) |
 
+### 3.0 VPN killswitch posture → `network.vpn.killswitch`
+
+Not a composite — included here because it's the second VPN-related row and pairs naturally with `network.vpn.running` for any answer about the user's VPN setup. Verifies (where the brand exposes a parseable settings file) that the killswitch / always-on / "block when disconnected" toggle is on. A VPN without a killswitch leaks the user's real IP every time the tunnel briefly drops — defeats most of the reason a privacy-conscious user pays for the service.
+
+Per-brand support today: **Mullvad** is verifiable (`settings.json` key `block_when_disconnected`); ProtonVPN and NordVPN settings are in binary plists / sqlite, so the check emits a per-brand advisory pointing to the in-app toggle. When surfacing this to a user with a verifiable brand, treat the `warn` (killswitch off) as actionable. When it's advisory-only, frame as "please verify in the app" — don't tell the user they have a gap if we couldn't confirm.
+
 ### 3.1 Encrypted-DNS gap → `network.dns.encrypted`
 
 Combines DoH/DoT live state, NextDNS profile, other DoH/DoT profiles, and VPN state. Pass = encrypted DNS active or configured. Skip-with-caveat = VPN up, plaintext-when-off. Warn = plaintext to ISP.
@@ -184,6 +190,8 @@ The audit emits a lot of rows that look concerning until you understand the cont
 - `2fa.hardware.installed: skip` (with Ledger present) — The hint already says Ledger covers FIDO2.
 - `network.dns.resolvers: skip` — Pure informational dump of DNS server IPs.
 - `sandbox.runtime.present: skip` — Always a `skip`. Present means "you have Docker / OrbStack / UTM available, use it for untrusted code." Absent means "consider installing one." Neither state is a finding; don't surface as a gap.
+- `messaging.telegram.advisory: skip` (when Telegram is installed) — The audit cannot read tdata, so this is an advisory pointer to settings the user should confirm by hand. Do NOT treat Telegram's presence as a finding; surface the hint as a follow-up checklist, not a gap.
+- `browser.profile_count: pass` or `skip` — Purely observational. `pass` with multiple profiles means the user already has some isolation; don't recommend additional changes. `skip "Single browser profile"` is a soft nudge worth surfacing if other wallet-related rows are firing (§3.3), but is not a gap on its own.
 - Single high `ext.total.count` — Browser extension count alone isn't actionable without knowing the contents.
 - `browser.installed` informational — Counts and reports, doesn't fail.
 

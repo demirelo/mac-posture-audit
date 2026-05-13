@@ -2,6 +2,63 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-05-13
+
+### Added
+
+- **`messaging.telegram.advisory`** (new Section 25) — advisory check for Telegram Desktop, Telegram Desktop variant bundles, and Telegram Lite (App Store build). Detects presence under `APP_ROOTS`. tdata is encrypted, so the audit can't read the actual privacy settings; the check is therefore intentionally informational. When Telegram is present, emits a `skip` with an explicit settings checklist: "Who can add me to group chats?" → My Contacts/Nobody, Automatic Media Download → OFF for private/groups/channels, Read time + Last Seen restricted to contacts. When Telegram is absent, emits `pass`. Default-on auto-download is the most common targeting vector — an attacker DMs a "PDF" and the file lands on disk silently before the user has decided whether to open it.
+- **`browser.version_currency`** (Section 9) — bundle mtime check across Chromium-based browsers (Chrome, Brave, Edge, Arc, Opera) and Firefox. Safari is deliberately excluded — it's managed by macOS updates and already covered by `update.auto`. The check iterates over a brand→bundle-name table, looks for each under `APP_ROOTS`, and compares the bundle's mtime against a 28-day threshold. Chromium and Firefox auto-updaters replace the bundle in place on first launch after a release, which touches the bundle's directory mtime, so a stale mtime is a strong signal that the browser hasn't auto-updated recently — either the user hasn't launched it, or auto-update is disabled / failing. Either way, every page render hits unpatched CVEs. Emits `pass` if all installed browsers are fresh, `warn` if any are stale (label enumerates each with its age in days), `skip` if no non-Safari browser is installed. `web3` and `paranoid` profiles escalate `warn → fail`. Stale browser names are redacted to a count under `--redact`.
+
+### Profile overrides
+
+- `web3 | browser.version_currency | warn → fail`
+- `paranoid | browser.version_currency | warn → fail`
+
+### Tests
+
+- New `tests/sections/25_messaging.bats` — 4 cases: Telegram absent (pass), `Telegram.app` present, `Telegram Desktop.app` (vendor variant) present, `Telegram Lite.app` (App Store) present. All assert the skip-with-advisory label on the present path.
+- New `tests/sections/09_browsers.bats` — 9 cases for `browser.version_currency`: no browser baseline, fresh single browser pass, single stale warn with age in label, mixed fresh+stale (only stale flagged), multi-stale aggregation, web3 + paranoid escalation, REDACT name suppression, near-threshold inside (27d) fresh, near-threshold outside (29d) stale. Uses `touch -t` macOS-style timestamps to control bundle mtime, and `APP_ROOTS` sandboxing so the check doesn't see real browsers on the runner.
+
+### New section
+
+- Section 25 — Messaging Apps (advisory). Wired into `run_all_sections()` after Section 24. Reserves space for future `messaging.signal.advisory`, `messaging.discord.advisory`, etc.; current scope is Telegram only per stated review preference.
+
+- **`browser.profile_count`** (Section 9) — purely informational signal that the user has already adopted some form of profile-level browser isolation (e.g. "Work" / "Personal" / "Wallet" profiles). Profiles aren't a strong security boundary (same OS user, same keychain) but a multi-profile setup is a strong tell that the user has thought about isolation, which lowers the leverage of further nudges. Counts Chromium-derived browsers (Chrome / Brave / Edge) by enumerating `Default` (with `Preferences` present) plus `Profile <N>` directories under each browser's User Data root, and Firefox by counting direct children of `~/Library/Application Support/Firefox/Profiles/`. Emits `pass` when ≥2 profiles are found anywhere across browsers (label enumerates per-browser counts like `Brave:2 Firefox:1`), `skip` with a nudge when exactly 1 is found, `skip` with N/A when 0 are enumerable. Per-browser counts are redacted to a total under `--redact`. No profile escalation — this is observational.
+- **`network.vpn.killswitch`** (Section 6, factored into `_check_vpn_killswitch` helper for testability) — verifies the killswitch / always-on / "block when disconnected" state on installed VPNs. Without it, brief tunnel drops leak the user's real IP to whatever they were connecting to — the exact failure mode VPN customers buy the product to avoid. Currently supports: Mullvad (parsed from `~/Library/Application Support/Mullvad VPN/settings.json` — `block_when_disconnected: true` → pass, `false` → warn, missing key → skip-with-advisory). ProtonVPN and NordVPN store their killswitch state in binary plists or sqlite DBs that aren't safe to parse without more code; for those brands the check falls back to a per-brand advisory ("Preferences → Connection → Kill Switch") so the user at least knows to verify. `web3` and `paranoid` profiles escalate `warn → fail`. Brand names are redacted under `--redact`. `VPN_KILLSWITCH_ROOTS` env is overridable for tests.
+
+### Profile overrides
+
+- `web3 | browser.version_currency | warn → fail`
+- `paranoid | browser.version_currency | warn → fail`
+- `web3 | network.vpn.killswitch | warn → fail`
+- `paranoid | network.vpn.killswitch | warn → fail`
+
+### Tests
+
+- New `tests/sections/25_messaging.bats` — 4 cases: Telegram absent (pass), `Telegram.app` present, `Telegram Desktop.app` (vendor variant) present, `Telegram Lite.app` (App Store) present. All assert the skip-with-advisory label on the present path.
+- New `tests/sections/09_browsers.bats` — 17 cases. version_currency block: no-browser baseline, fresh-only pass, single stale warn, mixed fresh+stale (only stale flagged), multi-stale aggregation, web3 + paranoid escalation, REDACT name suppression, near-threshold inside/outside (27d vs 29d). profile_count block: no-data skip, single-profile skip with nudge, multi-profile pass, multi-browser aggregation, Firefox multi-profile, REDACT per-browser suppression. Uses `touch -t` macOS-style timestamps to control bundle mtime, `APP_ROOTS` sandboxing, and an isolated `$HOME` for profile dir reads.
+- New `tests/sections/06_vpn_killswitch.bats` — 11 cases for the `_check_vpn_killswitch` helper. No-brand skip, Mullvad on (pass), Mullvad off (warn, with web3 and paranoid escalation to fail), Mullvad missing-key (skip-advisory), ProtonVPN advisory, NordVPN advisory, mixed Mullvad-on + ProtonVPN-advisory (advisory wins over verified pass), Mullvad-off + ProtonVPN (fail wins over advisory), REDACT brand-name suppression. `VPN_KILLSWITCH_ROOTS` sandbox isolates HOME-relative settings reads.
+
+### New section
+
+- Section 25 — Messaging Apps (advisory). Wired into `run_all_sections()` after Section 24. Reserves space for future `messaging.signal.advisory`, `messaging.discord.advisory`, etc.; current scope is Telegram only per stated review preference.
+
+### Refactor
+
+- The VPN killswitch logic is factored out of `section_06_dns_outbound` into a standalone `_check_vpn_killswitch` helper. Production calls it from the same place as before (right after the existing `network.vpn.running` emit) — behaviour unchanged. The factoring enables direct unit-level testing without having to mock the entire surrounding DNS / outbound-monitor stack.
+
+### Test-only overrides
+
+- `VPN_KILLSWITCH_ROOTS` — array of HOME-equivalent roots to scan for VPN settings files. Defaults to `$HOME`; tests set it to a `$BATS_TEST_TMPDIR/home` sandbox.
+
+### ID registry
+
+Four new entries in `tests/fixtures/expected_ids.txt`:
+- `messaging.telegram.advisory`
+- `browser.version_currency`
+- `browser.profile_count`
+- `network.vpn.killswitch`
+
 ## [0.3.0] - 2026-05-13
 
 ### Added

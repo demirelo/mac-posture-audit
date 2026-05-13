@@ -17,6 +17,8 @@ boot.kexts.disabled
 boot.secure.full
 browser.default
 browser.installed
+browser.profile_count
+browser.version_currency
 cloud.icloud.desktop_documents_sync
 cred.aws.creds
 cred.docker.auth
@@ -61,6 +63,7 @@ login.autologin.disabled
 login.lock.immediate
 login.touchid.sudo
 login.window.namepw
+messaging.telegram.advisory
 network.airdrop.discoverable
 network.bluetooth.off
 network.dns.encrypted
@@ -80,6 +83,7 @@ network.proxy.wpad
 network.remotelogin.off
 network.systemextensions.active
 network.systemextensions.filters
+network.vpn.killswitch
 network.vpn.running
 persist.cron
 persist.login_items

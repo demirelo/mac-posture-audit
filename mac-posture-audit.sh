@@ -30,7 +30,7 @@
 # shellcheck disable=SC2088
 set -uo pipefail
 
-SCRIPT_VERSION="0.3.0"
+SCRIPT_VERSION="0.4.0"
 
 # ── State ───────────────────────────────────────────────────────────────────
 PASS_N=0
@@ -214,6 +214,8 @@ PROFILE_OVERRIDES=(
   "web3|users.crypto_isolation_indicator|warn|fail"
   "web3|ide.vscode.workspace_trust|warn|fail"
   "web3|ide.cursor.workspace_trust|warn|fail"
+  "web3|browser.version_currency|warn|fail"
+  "web3|network.vpn.killswitch|warn|fail"
   # paranoid — high-threat user; lock down everything.
   "paranoid|ext.wallet|warn|fail"
   "paranoid|supply.npm.ignorescripts|warn|fail"
@@ -232,6 +234,8 @@ PROFILE_OVERRIDES=(
   "paranoid|users.crypto_isolation_indicator|warn|fail"
   "paranoid|ide.vscode.workspace_trust|warn|fail"
   "paranoid|ide.cursor.workspace_trust|warn|fail"
+  "paranoid|browser.version_currency|warn|fail"
+  "paranoid|network.vpn.killswitch|warn|fail"
   "paranoid|update.auto|warn|fail"
   "paranoid|cred.docker.auth|warn|fail"
   # developer — supply chain matters; wallet-warn keeps default semantic.
@@ -870,6 +874,78 @@ section_05_airdrop_bluetooth() {
 
 }
 
+_check_vpn_killswitch() {
+  # network.vpn.killswitch — verify (where the brand exposes a settings
+  # file) that the killswitch / always-on / "block when disconnected"
+  # mode is enabled. Without it, brief VPN drops leak your real IP to
+  # whatever you were connecting to — the exact failure mode the user
+  # buys a VPN to avoid.
+  #
+  # Per-brand support is currently:
+  #   - Mullvad: settings.json under ~/Library/Application Support/
+  #     Mullvad VPN/. The `block_when_disconnected` key is grep-able and
+  #     reliable. Pass if true, warn if false.
+  #   - ProtonVPN, NordVPN, Windscribe, etc: settings live in binary
+  #     plists or sqlite DBs that aren't safe to parse read-only without
+  #     more work. We fall back to a skip-with-advisory pointing to the
+  #     in-app toggle.
+  #
+  # Skip entirely if no known VPN brand is installed.
+  # VPN_KILLSWITCH_ROOTS is overridable for tests.
+  if [[ -z "${VPN_KILLSWITCH_ROOTS+set}" ]]; then
+    VPN_KILLSWITCH_ROOTS=("$HOME")
+  fi
+  local VPN_KS_REPORT=()
+  local ks_root mv_settings
+  for ks_root in "${VPN_KILLSWITCH_ROOTS[@]}"; do
+    mv_settings="$ks_root/Library/Application Support/Mullvad VPN/settings.json"
+    if [[ -f "$mv_settings" ]]; then
+      if grep -qE '"block_when_disconnected"[[:space:]]*:[[:space:]]*true' "$mv_settings" 2>/dev/null; then
+        VPN_KS_REPORT+=("mullvad:on")
+      elif grep -qE '"block_when_disconnected"[[:space:]]*:[[:space:]]*false' "$mv_settings" 2>/dev/null; then
+        VPN_KS_REPORT+=("mullvad:off")
+      else
+        VPN_KS_REPORT+=("mullvad:unknown")
+      fi
+      break
+    fi
+  done
+  for ks_root in "${VPN_KILLSWITCH_ROOTS[@]}"; do
+    if [[ -d "$ks_root/Library/Application Support/ProtonVPN" ]] || [[ -d "$ks_root/Library/Application Support/Proton/Proton VPN" ]]; then
+      VPN_KS_REPORT+=("protonvpn:advisory")
+      break
+    fi
+  done
+  for ks_root in "${VPN_KILLSWITCH_ROOTS[@]}"; do
+    if [[ -d "$ks_root/Library/Application Support/nordvpn-app" ]] || [[ -d "$ks_root/Library/Application Support/NordVPN" ]]; then
+      VPN_KS_REPORT+=("nordvpn:advisory")
+      break
+    fi
+  done
+  if [[ ${#VPN_KS_REPORT[@]} -eq 0 ]]; then
+    skip "No supported VPN brand for killswitch verification" "" "network.vpn.killswitch"
+    return
+  fi
+  local ks_fail=false ks_advisory=false entry
+  for entry in "${VPN_KS_REPORT[@]}"; do
+    case "$entry" in
+    *:off) ks_fail=true ;;
+    *:advisory | *:unknown) ks_advisory=true ;;
+    esac
+  done
+  if [[ "$ks_fail" == "true" ]]; then
+    warn "VPN killswitch is OFF on at least one installed VPN — drops leak your real IP" "Mullvad: toggle 'Always require VPN' in Preferences → VPN settings (or 'mullvad always-require-vpn set on'). Without this, every VPN reconnect briefly bypasses the tunnel." "network.vpn.killswitch"
+  elif [[ "$ks_advisory" == "true" ]]; then
+    if [[ "$REDACT" == "true" ]]; then
+      skip "VPN(s) detected; verify killswitch / always-on manually" "Killswitch state is not readable from the CLI for some brands. ProtonVPN: Preferences → Connection → Kill Switch. NordVPN: Preferences → Kill Switch." "network.vpn.killswitch"
+    else
+      skip "VPN(s) detected; verify killswitch manually: ${VPN_KS_REPORT[*]}" "Killswitch state is not readable from the CLI for some brands. ProtonVPN: Preferences → Connection → Kill Switch. NordVPN: Preferences → Kill Switch." "network.vpn.killswitch"
+    fi
+  else
+    pass "VPN killswitch is ON (verified: ${VPN_KS_REPORT[*]})" "network.vpn.killswitch"
+  fi
+}
+
 section_06_dns_outbound() {
   # ═════════════════════════════════════════════════════════════════════════════
   # 06 · Network — DNS & Outbound
@@ -979,6 +1055,8 @@ section_06_dns_outbound() {
       skip "No VPN client process detected" "ProtonVPN / Mullvad / WireGuard recommended for travel" "network.vpn.running"
     fi
   fi
+
+  _check_vpn_killswitch
 
   # Outbound monitor
   if pgrep -qi littlesnitch 2>/dev/null || pgrep -qi com.objective-see.lulu 2>/dev/null; then
@@ -1429,6 +1507,130 @@ section_09_browsers() {
     ;;
   esac
 
+  # browser.version_currency — bundle mtime as a proxy for "has the app
+  # been updated recently". Chromium-based browsers and Firefox auto-
+  # update by replacing the bundle on first launch after a release; the
+  # bundle's directory mtime gets touched in the process. If mtime is
+  # more than 28 days old, the user either hasn't launched the browser
+  # recently or auto-update is disabled / failing. Either path means
+  # exposure to CVEs that have shipped since.
+  #
+  # Safari is deliberately excluded — it's managed by macOS updates and
+  # covered by update.auto.
+  if [[ -z "${APP_ROOTS+set}" ]]; then
+    APP_ROOTS=("/Applications" "$HOME/Applications")
+  fi
+  BROWSER_BUNDLES=(
+    "Brave|Brave Browser.app"
+    "Chrome|Google Chrome.app"
+    "Firefox|Firefox.app"
+    "Arc|Arc.app"
+    "Edge|Microsoft Edge.app"
+    "Opera|Opera.app"
+  )
+  STALE_BROWSERS=()
+  FRESH_COUNT=0
+  NOW=$(date +%s)
+  STALE_THRESHOLD=$(( 28 * 86400 ))
+  for row in "${BROWSER_BUNDLES[@]}"; do
+    brand="${row%%|*}"
+    bundle_name="${row##*|}"
+    bundle=""
+    for root in "${APP_ROOTS[@]}"; do
+      if [[ -d "$root/$bundle_name" ]]; then
+        bundle="$root/$bundle_name"
+        break
+      fi
+    done
+    [[ -n "$bundle" ]] || continue
+    mtime=$(stat -f %m "$bundle" 2>/dev/null || echo "")
+    [[ -n "$mtime" ]] || continue
+    age=$(( NOW - mtime ))
+    age_days=$(( age / 86400 ))
+    if (( age > STALE_THRESHOLD )); then
+      STALE_BROWSERS+=("${brand} (${age_days}d)")
+    else
+      FRESH_COUNT=$(( FRESH_COUNT + 1 ))
+    fi
+  done
+  if [[ ${#STALE_BROWSERS[@]} -eq 0 ]]; then
+    if (( FRESH_COUNT == 0 )); then
+      skip "No non-Safari browser installed — version currency check N/A" "" "browser.version_currency"
+    else
+      pass "All installed non-Safari browsers updated within 28 days (${FRESH_COUNT} checked)" "browser.version_currency"
+    fi
+  else
+    if [[ "$REDACT" == "true" ]]; then
+      warn "${#STALE_BROWSERS[@]} browser(s) >28d stale" "Launch each to trigger the built-in auto-updater, or 'brew upgrade --cask <name>' if installed that way. Stale Chromium / Firefox = unpatched CVEs on every page render. Bundle mtime is a proxy — it gets touched whenever the auto-updater swaps the binary." "browser.version_currency"
+    else
+      warn "Browser bundle(s) >28d stale: ${STALE_BROWSERS[*]}" "Launch each to trigger the built-in auto-updater, or 'brew upgrade --cask <name>' if installed that way. Stale Chromium / Firefox = unpatched CVEs on every page render. Bundle mtime is a proxy — it gets touched whenever the auto-updater swaps the binary." "browser.version_currency"
+    fi
+  fi
+
+  # browser.profile_count — purely informational signal that the user has
+  # already adopted some form of profile-level isolation (e.g. "Work"
+  # profile vs. "Personal" vs. "Wallet"). Profiles are not a strong
+  # security boundary — extensions can be installed per-profile, but the
+  # underlying OS user and keychain are shared — yet a multi-profile
+  # setup is a strong tell that the user has thought about isolation
+  # and lowers the leverage of further nudges.
+  #
+  # Chromium derivatives all use the same on-disk layout: each profile
+  # is a directory named "Default" or "Profile <N>" under the User Data
+  # root, identifiable by the presence of a Preferences file. We count
+  # those directories. Firefox uses random-suffix dirs under
+  # ~/Library/Application Support/Firefox/Profiles/ — we count direct
+  # children of Profiles/.
+  PROFILE_COUNT_TOTAL=0
+  PROFILE_COUNT_BREAKDOWN=()
+  CHROMIUM_PROFILE_ROOTS=(
+    "Brave|$HOME/Library/Application Support/BraveSoftware/Brave-Browser"
+    "Chrome|$HOME/Library/Application Support/Google/Chrome"
+    "Edge|$HOME/Library/Application Support/Microsoft Edge"
+  )
+  for row in "${CHROMIUM_PROFILE_ROOTS[@]}"; do
+    brand="${row%%|*}"
+    root="${row##*|}"
+    [[ -d "$root" ]] || continue
+    count=0
+    if [[ -f "$root/Default/Preferences" ]]; then
+      count=$(( count + 1 ))
+    fi
+    while IFS= read -r p; do
+      [[ -n "$p" ]] && count=$(( count + 1 ))
+    done < <(find "$root" -maxdepth 1 -type d -name 'Profile *' 2>/dev/null)
+    if (( count > 0 )); then
+      PROFILE_COUNT_TOTAL=$(( PROFILE_COUNT_TOTAL + count ))
+      PROFILE_COUNT_BREAKDOWN+=("${brand}:${count}")
+    fi
+  done
+  # Firefox.
+  FIREFOX_PROFILES_DIR="$HOME/Library/Application Support/Firefox/Profiles"
+  if [[ -d "$FIREFOX_PROFILES_DIR" ]]; then
+    ff_count=0
+    while IFS= read -r p; do
+      [[ -n "$p" ]] && ff_count=$(( ff_count + 1 ))
+    done < <(find "$FIREFOX_PROFILES_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null)
+    if (( ff_count > 0 )); then
+      PROFILE_COUNT_TOTAL=$(( PROFILE_COUNT_TOTAL + ff_count ))
+      PROFILE_COUNT_BREAKDOWN+=("Firefox:${ff_count}")
+    fi
+  fi
+  if (( PROFILE_COUNT_TOTAL == 0 )); then
+    skip "Browser profiles: none enumerable (no Chromium / Firefox data dirs found)" "" "browser.profile_count"
+  elif (( PROFILE_COUNT_TOTAL == 1 )); then
+    if [[ "$REDACT" == "true" ]]; then
+      skip "Single browser profile in use" "Consider creating a second profile to separate wallet / sensitive logins from everyday browsing. Same browser binary, separate cookie jar, separate extension set." "browser.profile_count"
+    else
+      skip "Single browser profile in use (${PROFILE_COUNT_BREAKDOWN[*]})" "Consider creating a second profile to separate wallet / sensitive logins from everyday browsing. Same browser binary, separate cookie jar, separate extension set." "browser.profile_count"
+    fi
+  else
+    if [[ "$REDACT" == "true" ]]; then
+      pass "Multiple browser profiles in use (${PROFILE_COUNT_TOTAL} total)" "browser.profile_count"
+    else
+      pass "Multiple browser profiles in use: ${PROFILE_COUNT_BREAKDOWN[*]}" "browser.profile_count"
+    fi
+  fi
 }
 
 section_10_browser_extensions() {
@@ -3392,6 +3594,57 @@ section_24_ide_trust() {
   fi
 }
 
+section_25_messaging() {
+  # ═════════════════════════════════════════════════════════════════════════════
+  # 25 · Messaging Apps (advisory)
+  # ═════════════════════════════════════════════════════════════════════════════
+  # Messaging apps store their settings in opaque per-app stores (Telegram's
+  # tdata is encrypted binary; Signal uses a SQLCipher database; Discord
+  # uses an Electron leveldb). We can detect *presence* but not the actual
+  # privacy settings the user cares about — auto-download of media,
+  # group-add restrictions, link-preview behaviour.
+  #
+  # The right shape for these checks is therefore *advisory*: when the app
+  # is installed, emit a skip with the explicit settings the user should
+  # verify by hand. When the app is absent, emit pass. We deliberately do
+  # NOT flag presence itself as a finding — Telegram (and the rest) are
+  # legitimate tools; the risk is in default configurations.
+  section "25 · Messaging Apps (advisory)"
+
+  # Telegram Desktop.
+  # Real-world targeting pattern: attacker DMs the target a "PDF" or
+  # "image"; with auto-download on, the file lands in the user's
+  # ~/Downloads silently, sometimes opening on hover-preview. Combined
+  # with "anyone can add me to group chats" the attacker doesn't even
+  # need to know the target's username — they can spray-add from a
+  # bought list.
+  # Initialise APP_ROOTS here in case section 25 runs in a context where
+  # section 22's initialisation didn't (e.g. unit tests that drive
+  # section_25_messaging directly).
+  if [[ -z "${APP_ROOTS+set}" ]]; then
+    APP_ROOTS=("/Applications" "$HOME/Applications")
+  fi
+  TELEGRAM_BUNDLES=(
+    "Telegram.app"
+    "Telegram Desktop.app"
+    "Telegram Lite.app"
+  )
+  TELEGRAM_FOUND=()
+  for app in "${TELEGRAM_BUNDLES[@]}"; do
+    for root in "${APP_ROOTS[@]}"; do
+      if [[ -d "$root/$app" ]]; then
+        TELEGRAM_FOUND+=("${app%.app}")
+        break
+      fi
+    done
+  done
+  if [[ ${#TELEGRAM_FOUND[@]} -gt 0 ]]; then
+    skip "Telegram Desktop installed — verify privacy defaults manually" "tdata is encrypted, so this check can't read settings directly. Open Telegram → Settings → and verify: (a) Privacy → 'Who can add me to group chats?' is 'My Contacts' or 'Nobody'; (b) Advanced → Automatic Media Download is OFF for private chats, groups, and channels (especially while on mobile data and roaming); (c) Privacy → Messages → 'Read time' and 'Last Seen' restricted to contacts. Default-on auto-download is the most common targeting vector — attacker DMs a 'PDF' and it lands on disk silently." "messaging.telegram.advisory"
+  else
+    pass "Telegram Desktop not installed" "messaging.telegram.advisory"
+  fi
+}
+
 run_all_sections() {
   section_01_system_integrity
   section_02_login_lock
@@ -3417,6 +3670,7 @@ run_all_sections() {
   section_22_persistence_tcc
   section_23_device_mgmt_privacy
   section_24_ide_trust
+  section_25_messaging
 }
 
 _diff_parse_rows() {
