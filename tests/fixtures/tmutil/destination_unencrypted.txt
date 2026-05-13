@@ -1,0 +1,5 @@
+Name          : BackupDisk
+Kind          : Local
+Mount Point   : /Volumes/BackupDisk
+ID            : 11111111-2222-3333-4444-555555555555
+Encrypted     : 0

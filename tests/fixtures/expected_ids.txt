@@ -10,6 +10,7 @@ backup.recovery_path
 backup.offsite
 backup.tm.auto
 backup.tm.destination
+backup.tm.encrypted
 backup.tm.recency
 boot.kexts.disabled
 boot.secure.full
@@ -24,6 +25,9 @@ cred.kube.token
 cred.netrc.passwords
 cred.npmrc.token
 cred.shellrc.patterns
+data.crypto.cloud_sync_exposure
+data.dotfiles.cloud_sync_exposure
+data.ssh.cloud_sync_exposure
 ext.firefox.protective
 ext.firefox.total
 ext.firefox.wallet

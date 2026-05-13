@@ -209,6 +209,7 @@ PROFILE_OVERRIDES=(
   "web3|supply.scanner|warn|fail"
   "web3|ssh.keys.unencrypted|warn|fail"
   "web3|ext.simulator.advice|warn|fail"
+  "web3|data.crypto.cloud_sync_exposure|warn|fail"
   # paranoid — high-threat user; lock down everything.
   "paranoid|ext.wallet|warn|fail"
   "paranoid|supply.npm.ignorescripts|warn|fail"
@@ -221,6 +222,8 @@ PROFILE_OVERRIDES=(
   "paranoid|network.firewall.blockall|warn|fail"
   "paranoid|network.firewall.stealth|warn|fail"
   "paranoid|backup.tm.recency|warn|fail"
+  "paranoid|backup.tm.encrypted|warn|fail"
+  "paranoid|data.crypto.cloud_sync_exposure|warn|fail"
   "paranoid|update.auto|warn|fail"
   "paranoid|cred.docker.auth|warn|fail"
   # developer — supply chain matters; wallet-warn keeps default semantic.
@@ -426,6 +429,35 @@ redact_list() {
     out="${out}$(redact "$kind" "$item")"
   done
   printf '%s' "$out"
+}
+
+# ── Cloud-sync root detection ───────────────────────────────────────────────
+# _path_in_cloud_root PATH — prints the cloud provider name if PATH (after
+# tilde + $HOME expansion) is inside a known sync root; empty string otherwise.
+#
+# Detected providers:
+#   - iCloud Drive       (~/Library/Mobile Documents/com~apple~CloudDocs)
+#   - Dropbox            (~/Library/CloudStorage/Dropbox or ~/Dropbox)
+#   - Google Drive       (~/Library/CloudStorage/GoogleDrive* or ~/Google Drive)
+#   - OneDrive           (~/Library/CloudStorage/OneDrive* or ~/OneDrive)
+#   - Box                (~/Library/CloudStorage/Box* or ~/Box Sync)
+#   - generic File Provider (~/Library/CloudStorage/* fallback — covers Sync,
+#                            pCloud, MEGA, etc.)
+#
+# Caller is responsible for tilde + env expansion before invoking. This
+# function does NOT resolve symlinks (no fork) — a symlink that points INTO
+# a cloud root but is itself outside it will be missed. Documented limit.
+_path_in_cloud_root() {
+  local p="$1"
+  case "$p" in
+  *"Library/Mobile Documents/com~apple~CloudDocs"*) printf 'iCloud Drive' ;;
+  *"Library/CloudStorage/Dropbox"* | "$HOME/Dropbox"*) printf 'Dropbox' ;;
+  *"Library/CloudStorage/GoogleDrive"* | "$HOME/Google Drive"*) printf 'Google Drive' ;;
+  *"Library/CloudStorage/OneDrive"* | "$HOME/OneDrive"*) printf 'OneDrive' ;;
+  *"Library/CloudStorage/Box"* | "$HOME/Box Sync"*) printf 'Box' ;;
+  *"Library/CloudStorage/"*) printf 'Cloud (File Provider)' ;;
+  *) printf '' ;;
+  esac
 }
 
 _tcc_query_approved() {
@@ -2378,6 +2410,92 @@ section_17_folder_layout() {
     warn "Sensitive folder names at \$HOME: ${SENSITIVE_FOUND[*]}" "Consider moving inside an encrypted Vault sparsebundle (mount on demand)" "folder.sensitive.names"
   fi
 
+  # Cloud-sync exposure: SSH / cred dirs.
+  # Uploading SSH private keys, AWS credentials, kubeconfig, or GPG to
+  # iCloud Drive / Dropbox / etc. is recoverable by anyone with cloud-account
+  # access — defeats FileVault, defeats key passphrases (the encrypted form
+  # is still trivially brute-forceable offline). Hard fail by default; no
+  # profile escalation needed.
+  #
+  # We resolve symlinks via `cd + pwd -P` (a subshell fork is acceptable here
+  # — at most ~20 paths checked per run, only directories that exist) so the
+  # check catches the common case where ~/.ssh is itself a symlink into
+  # ~/Library/Mobile Documents/com~apple~CloudDocs/ (e.g., via the user's
+  # "Desktop & Documents in iCloud Drive" setup).
+  SSH_EXPOSURE_FOUND=()
+  for d in "$HOME/.ssh" "$HOME/.aws" "$HOME/.kube" "$HOME/.gnupg"; do
+    [[ -d "$d" ]] || continue
+    real=$(cd "$d" 2>/dev/null && pwd -P)
+    [[ -n "$real" ]] || continue
+    provider=$(_path_in_cloud_root "$real")
+    if [[ -n "$provider" ]]; then
+      SSH_EXPOSURE_FOUND+=("$(basename "$d") → $provider")
+    fi
+  done
+  if [[ ${#SSH_EXPOSURE_FOUND[@]} -gt 0 ]]; then
+    fail "SSH / credential dirs inside cloud sync: ${SSH_EXPOSURE_FOUND[*]}" "Move these out of the synced folder immediately. SSH keys / AWS creds / kube tokens inside iCloud Drive / Dropbox / etc. are recoverable by anyone with cloud-account access — defeats FileVault at rest." "data.ssh.cloud_sync_exposure"
+  else
+    pass "No SSH / credential dirs inside cloud sync" "data.ssh.cloud_sync_exposure"
+  fi
+
+  # Cloud-sync exposure: crypto wallet application data.
+  # Wallet metadata, watch-only descriptors, and (for some wallets) encrypted
+  # seed material lives in these dirs. Syncing them to a cloud provider is a
+  # partial-key-exposure incident waiting to happen.
+  CRYPTO_EXPOSURE_FOUND=()
+  for d in \
+    "$HOME/Library/Application Support/Ledger Live" \
+    "$HOME/Library/Application Support/Trezor Suite" \
+    "$HOME/Library/Ethereum" \
+    "$HOME/.ethereum" \
+    "$HOME/Library/Application Support/Electrum" \
+    "$HOME/Library/Application Support/Sparrow" \
+    "$HOME/Library/Application Support/Bitcoin"; do
+    [[ -d "$d" ]] || continue
+    real=$(cd "$d" 2>/dev/null && pwd -P)
+    [[ -n "$real" ]] || continue
+    provider=$(_path_in_cloud_root "$real")
+    if [[ -n "$provider" ]]; then
+      CRYPTO_EXPOSURE_FOUND+=("$(basename "$d") → $provider")
+    fi
+  done
+  if [[ ${#CRYPTO_EXPOSURE_FOUND[@]} -gt 0 ]]; then
+    warn "Wallet app data inside cloud sync: ${CRYPTO_EXPOSURE_FOUND[*]}" "Wallet metadata + (for some wallets) encrypted seed material lives in these dirs. Move them out of cloud sync." "data.crypto.cloud_sync_exposure"
+  else
+    pass "No wallet app data inside cloud sync" "data.crypto.cloud_sync_exposure"
+  fi
+
+  # Cloud-sync exposure: shell / tooling dotfiles.
+  # Complements Section 14's credential-pattern detection on the *location*
+  # axis — even unscanned secret strings leak when these files are inside
+  # a cloud-sync root. Files (not dirs); resolve parent dir to catch symlinks.
+  DOTFILES_EXPOSURE_FOUND=()
+  for f in \
+    "$HOME/.gitconfig" \
+    "$HOME/.zshrc" \
+    "$HOME/.bashrc" \
+    "$HOME/.zprofile" \
+    "$HOME/.profile" \
+    "$HOME/.netrc" \
+    "$HOME/.pypirc" \
+    "$HOME/.npmrc" \
+    "$HOME/.cargo/credentials" \
+    "$HOME/.gem/credentials"; do
+    [[ -e "$f" ]] || continue
+    parent=$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)
+    [[ -n "$parent" ]] || continue
+    real="$parent/$(basename "$f")"
+    provider=$(_path_in_cloud_root "$real")
+    if [[ -n "$provider" ]]; then
+      DOTFILES_EXPOSURE_FOUND+=("$(basename "$f") → $provider")
+    fi
+  done
+  if [[ ${#DOTFILES_EXPOSURE_FOUND[@]} -gt 0 ]]; then
+    warn "Dotfiles inside cloud sync: ${DOTFILES_EXPOSURE_FOUND[*]}" "Shell rc / npmrc / gitconfig etc. inside cloud sync exposes credentials and config to anyone with cloud-account access. Move them out." "data.dotfiles.cloud_sync_exposure"
+  else
+    pass "No tracked dotfiles inside cloud sync" "data.dotfiles.cloud_sync_exposure"
+  fi
+
 }
 
 section_18_backups() {
@@ -2433,6 +2551,22 @@ section_18_backups() {
     pass "Time Machine auto-backup is on" "backup.tm.auto"
   elif [[ "$TM_AUTO" == "0" ]]; then
     warn "Time Machine auto-backup is off" "System Settings → General → Time Machine → Back up automatically" "backup.tm.auto"
+  fi
+
+  # Time Machine destination encryption.
+  # tmutil destinationinfo emits an `Encrypted` field per destination on
+  # Sonoma+ (and earlier for some configurations). Value is "1"/"0" or
+  # "Yes"/"No" depending on macOS version. An unencrypted TM drive is a
+  # full-disk image readable by anyone who steals it — defeats FileVault
+  # at rest. Hard signal worth surfacing separately from destination presence.
+  if echo "$TM_DEST" | grep -qiE "no destinations|No backup destinations"; then
+    skip "Time Machine has no destination configured" "Once a destination is added, ensure 'Encrypt backup' is on." "backup.tm.encrypted"
+  elif echo "$TM_DEST" | grep -qiE "Encrypted *: *(1|Yes)"; then
+    pass "Time Machine destination is encrypted" "backup.tm.encrypted"
+  elif echo "$TM_DEST" | grep -qiE "Encrypted *: *(0|No)"; then
+    warn "Time Machine destination is unencrypted" "An unencrypted TM drive is a full-disk image readable by anyone who steals it — defeats FileVault. System Settings → General → Time Machine → select disk → 'Encrypt Backup'." "backup.tm.encrypted"
+  else
+    skip "Time Machine encryption status not exposed by this tmutil version" "Verify manually: System Settings → General → Time Machine → backup disk → 'Encrypt backup' should be on." "backup.tm.encrypted"
   fi
 
   # Offsite backup tools

@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **`backup.tm.encrypted`** (Section 18) — checks whether Time Machine destinations advertise `Encrypted : 1` (or `Yes`) via `tmutil destinationinfo`. Surfaces the case where TM is configured but the destination is *not* encrypted, which leaves a full-disk image readable by anyone who steals the backup drive — defeats FileVault at rest. Emits `pass` when encrypted, `warn` when explicitly unencrypted, `skip` when no destination is configured or the field is absent on this `tmutil` version. `paranoid` profile escalates `warn → fail`.
+- **`data.ssh.cloud_sync_exposure`** (Section 17) — iterates over `~/.ssh`, `~/.aws`, `~/.kube`, `~/.gnupg`; resolves real path via `cd + pwd -P` so symlinks into cloud-sync roots are caught; calls `_path_in_cloud_root`; **fails by default** (no profile escalation needed — uploading SSH keys to iCloud Drive / Dropbox / etc. is recoverable by anyone with cloud-account access and defeats key passphrases since the encrypted form is offline-brute-forceable). Provider name (iCloud Drive / Dropbox / Google Drive / OneDrive / Box / generic File Provider) is included in the label.
+- **`data.crypto.cloud_sync_exposure`** (Section 17) — same pattern against wallet application-support dirs: Ledger Live, Trezor Suite, Electrum, Sparrow, Bitcoin, plus `~/Library/Ethereum` and `~/.ethereum`. Wallet metadata, watch-only descriptors, and (for some wallets) encrypted seed material live in these dirs. Default `warn`; `web3` and `paranoid` profiles escalate to `fail`.
+- **`data.dotfiles.cloud_sync_exposure`** (Section 17) — covers `~/.gitconfig`, `~/.zshrc`, `~/.bashrc`, `~/.zprofile`, `~/.profile`, `~/.netrc`, `~/.pypirc`, `~/.npmrc`, `~/.cargo/credentials`, `~/.gem/credentials`. Files (not directories), so resolution is via parent's `pwd -P` + basename to catch symlinks. Complements Section 14 credential-pattern detection on the *location* axis: even unscanned secrets leak when these files are inside a cloud-sync root. Default `warn`.
+
+### Profile overrides
+
+- `web3 | data.crypto.cloud_sync_exposure | warn → fail`
+- `paranoid | data.crypto.cloud_sync_exposure | warn → fail`
+- `paranoid | backup.tm.encrypted | warn → fail`
+
+### Tests
+
+- New `tests/sections/17_folder_layout.bats` — 10 cases covering: no-finding baseline, SSH/AWS/kube/gnupg under iCloud, wallet-app-data under iCloud with default + web3 + paranoid severity, dotfiles under iCloud, downloads hygiene, vault sparsebundle detection. Uses an isolated `$HOME` inside `$BATS_TEST_TMPDIR` (`isolate_home` / `isolate_home_in_icloud` helpers in the file) so tests never touch real user dotfiles.
+- Five new `tests/sections/18_backups.bats` cases covering the four `backup.tm.encrypted` outcomes (pass / warn / skip-no-destination / skip-older-tmutil) plus a paranoid-profile escalation case.
+
+### Fixtures
+
+- `tests/fixtures/tmutil/destination_encrypted.txt` — `Encrypted : 1`
+- `tests/fixtures/tmutil/destination_unencrypted.txt` — `Encrypted : 0`
+
+### ID registry
+
+Four new entries in `tests/fixtures/expected_ids.txt`:
+- `backup.tm.encrypted`
+- `data.ssh.cloud_sync_exposure`
+- `data.crypto.cloud_sync_exposure`
+- `data.dotfiles.cloud_sync_exposure`
+
 ## [0.1.0] - 2026-05-10
 
 Initial release.

@@ -62,6 +62,7 @@ These are pairs/triples of rows that are individually low-signal or `skip`/`warn
 | 3.8 | Identity confusion | — | agent-only (needs external context) |
 | 3.9 | Two AVs running | `av.engine.conflict` | ✅ baked in (existing) |
 | 3.10 | FIDO2 gap with hardware wallet present | `twofa.fido_gap` | ✅ baked in |
+| 3.11 | Cloud-sync exfiltration | `data.ssh.cloud_sync_exposure` + `data.crypto.cloud_sync_exposure` + `data.dotfiles.cloud_sync_exposure` | ✅ baked in (per-domain) |
 
 ### 3.1 Encrypted-DNS gap → `network.dns.encrypted`
 
@@ -70,6 +71,8 @@ Combines DoH/DoT live state, NextDNS profile, other DoH/DoT profiles, and VPN st
 ### 3.2 Backup desert → `backup.recovery_path`
 
 Combines `backup.tm.destination` + `backup.tm.recency` + `backup.offsite` + iCloud Drive presence. Stale TM (>7d) doesn't count as a source.
+
+Related individual check: **`backup.tm.encrypted`** answers a different question — *is the existing TM destination encrypted at rest?* An unencrypted TM drive is a full-disk image readable by anyone who walks off with the drive, so it silently defeats FileVault for the backup data. Default `warn`; `--profile paranoid` escalates to `fail`. Skips when no destination is configured (covered by `backup.recovery_path`) or when the running `tmutil` is old enough that it doesn't expose the `Encrypted` field. When surfacing the backup story to a user, treat `backup.recovery_path` (do they *have* a backup) and `backup.tm.encrypted` (is the backup *itself* safe) as a paired narrative.
 
 iCloud Drive is treated as a *partial* source — it covers `~/Documents` + `~/Desktop` (only if the user opted into "Desktop & Documents Folders"), Photos, and iCloud-aware app data. It does NOT cover `/Applications`, `~/Dev`, brew installs, system state, or anything outside iCloud-aware containers. Deletes propagate (no ransomware resilience). Versioning is ≤30 days. End-to-end encryption requires Advanced Data Protection turned on.
 
@@ -111,6 +114,20 @@ Already an explicit row. Two real-time engines fight over hooks and miss things.
 ### 3.10 FIDO2 gap with hardware wallet present → `twofa.fido_gap`
 
 Combines `wallet.hw.installed` + `twofa.hardware.installed`. If the user has Ledger / Trezor but no YubiKey, the same hardware wallet usually ships a FIDO2 companion app — free upgrade for account 2FA on 1Password / GitHub / exchanges. Skip-with-nudge.
+
+### 3.11 Cloud-sync exfiltration → `data.ssh.cloud_sync_exposure` + `data.crypto.cloud_sync_exposure` + `data.dotfiles.cloud_sync_exposure`
+
+iCloud Drive, Dropbox, Google Drive, OneDrive, and Box all silently replicate whatever lives under their root to every other device on the same account — and to the provider's servers. When a sensitive directory ends up under one of those roots (because the user moved their home, symlinked `~/.ssh`, or enabled "Desktop & Documents Folders" in iCloud), the threat model collapses: a compromise of any *other* signed-in device or of the provider's storage leaks the secret.
+
+The script splits this pattern across three IDs by sensitivity domain:
+
+- **`data.ssh.cloud_sync_exposure`** — `.ssh`, `.aws`, `.kube`, `.gnupg` under a cloud root. Hard `fail` in every profile. Private keys, cloud admin creds, kubeconfigs, GPG private keyrings. There is no scenario where these belong in cloud sync.
+- **`data.crypto.cloud_sync_exposure`** — wallet app data directories (Ledger Live, Trezor Suite, Electrum, Sparrow, Bitcoin Core, `~/Library/Ethereum`, `~/.ethereum`) under a cloud root. Default `warn`; `--profile web3` and `--profile paranoid` escalate to `fail`. The wallet app's data dir can hold encrypted seed material; replicating that to a less-trusted device weakens the hardware boundary.
+- **`data.dotfiles.cloud_sync_exposure`** — common dotfiles (`.zshrc`, `.bashrc`, `.profile`, `.gitconfig`, `.npmrc`, `.netrc`) under a cloud root. Default `warn`. These don't always contain secrets, but `.npmrc` and `.netrc` frequently do, and `.gitconfig` leaks the user's commit identity. The audit can't safely read these files to confirm; surface as "review before assuming this is fine."
+
+Detection uses `cd "$d" && pwd -P` (or `dirname` + `pwd -P` + basename for files) so symlinks resolve to their real on-disk path before matching the cloud-root patterns in `_path_in_cloud_root`. A real example caught in the wild: `~/.ssh` symlinked into `~/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.ssh` so the user could "share dotfiles across machines" — every key sitting in Apple's storage and on every other Mac signed into the same Apple ID.
+
+When all three fire on the same Mac, do not list them as three separate problems. Surface as: "Your home directory is layered over a cloud-sync root. Move it back, or move the sensitive subdirectories out, before doing anything else."
 
 ## 4. Things that are NOT issues
 
