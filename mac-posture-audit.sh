@@ -155,7 +155,7 @@ detect_runtime() {
   # When launched via sudo, keep auditing the invoking user's home directory.
   # Otherwise user-level checks would inspect /var/root instead of the real account.
   if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]]; then
-    SUDO_USER_HOME=$(dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2; exit}')
+    SUDO_USER_HOME=$(dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory 2>/dev/null | sed 's/^NFSHomeDirectory:[[:space:]]*//' | head -1)
     [[ -d "$SUDO_USER_HOME" ]] && HOME="$SUDO_USER_HOME"
   fi
 
@@ -426,6 +426,35 @@ redact_list() {
     out="${out}$(redact "$kind" "$item")"
   done
   printf '%s' "$out"
+}
+
+_tcc_query_approved() {
+  # _tcc_query_approved DB USE_SUDO
+  # Prints "service|client" rows for approved TCC grants. Supports both the
+  # modern auth_value schema and the older allowed schema. Returns non-zero if
+  # the database cannot be read or the schema is not recognised.
+  local db="$1" use_sudo="$2" cols query
+  if [[ "$use_sudo" == "true" ]]; then
+    sudo -n test -r "$db" 2>/dev/null || return 1
+    cols=$(sudo -n sqlite3 -readonly "$db" "PRAGMA table_info(access);" 2>/dev/null) || return 1
+  else
+    [[ -r "$db" ]] || return 1
+    cols=$(sqlite3 -readonly "$db" "PRAGMA table_info(access);" 2>/dev/null) || return 1
+  fi
+
+  if echo "$cols" | grep -q '|auth_value|'; then
+    query="SELECT service || '|' || client FROM access WHERE auth_value=2 ORDER BY service, client"
+  elif echo "$cols" | grep -q '|allowed|'; then
+    query="SELECT service || '|' || client FROM access WHERE allowed=1 ORDER BY service, client"
+  else
+    return 1
+  fi
+
+  if [[ "$use_sudo" == "true" ]]; then
+    sudo -n sqlite3 -readonly "$db" "$query" 2>/dev/null || return 1
+  else
+    sqlite3 -readonly "$db" "$query" 2>/dev/null || return 1
+  fi
 }
 
 # ── Browser-extension detection helpers (used by AV + Browser Extensions) ──
@@ -904,14 +933,26 @@ section_06_dns_outbound() {
       pass "VPN client running: ${VPN_PROCS}" "network.vpn.running"
     fi
   else
-    skip "No VPN client process detected" "ProtonVPN / Mullvad / WireGuard recommended for travel" "network.vpn.running"
+    if [[ "$REDACT" == "true" ]]; then
+      skip "No VPN client process detected" "Use a reputable VPN when traveling or using untrusted networks." "network.vpn.running"
+    else
+      skip "No VPN client process detected" "ProtonVPN / Mullvad / WireGuard recommended for travel" "network.vpn.running"
+    fi
   fi
 
   # Outbound monitor
   if pgrep -qi littlesnitch 2>/dev/null || pgrep -qi com.objective-see.lulu 2>/dev/null; then
-    pass "Outbound monitor running (Little Snitch or LuLu)" "network.outboundmonitor.running"
+    if [[ "$REDACT" == "true" ]]; then
+      pass "Outbound monitor running" "network.outboundmonitor.running"
+    else
+      pass "Outbound monitor running (Little Snitch or LuLu)" "network.outboundmonitor.running"
+    fi
   else
-    warn "No outbound network monitor detected" "Install Little Snitch (paid) or LuLu (free) — catches malware exfil" "network.outboundmonitor.running"
+    if [[ "$REDACT" == "true" ]]; then
+      warn "No outbound network monitor detected" "Install a reputable outbound firewall to catch unexpected network egress." "network.outboundmonitor.running"
+    else
+      warn "No outbound network monitor detected" "Install Little Snitch (paid) or LuLu (free) — catches malware exfil" "network.outboundmonitor.running"
+    fi
   fi
 
 }
@@ -942,7 +983,11 @@ section_07_filters_proxies() {
 
     if echo "$PROXY_DUMP" | grep -qE "^[[:space:]]*ProxyAutoConfigEnable *: *1"; then
       PAC_URL=$(echo "$PROXY_DUMP" | awk '/ProxyAutoConfigURLString *: */ {sub(/.*: */,""); print; exit}')
-      fail "Proxy auto-config (PAC) URL is set: ${PAC_URL:-unknown}" "Verify legitimate. PAC URLs are used by malware to redirect traffic. Disable if unfamiliar." "network.proxy.pac"
+      if [[ "$REDACT" == "true" ]]; then
+        fail "Proxy auto-config (PAC) URL is set" "Verify legitimate. PAC URLs are used by malware to redirect traffic. Disable if unfamiliar." "network.proxy.pac"
+      else
+        fail "Proxy auto-config (PAC) URL is set: ${PAC_URL:-unknown}" "Verify legitimate. PAC URLs are used by malware to redirect traffic. Disable if unfamiliar." "network.proxy.pac"
+      fi
     else
       pass "No proxy auto-config (PAC) URL set" "network.proxy.pac"
     fi
@@ -1094,7 +1139,13 @@ section_08_av_endpoint() {
   done
 
   case ${#AV_FOUND[@]} in
-  0) warn "No antivirus / EDR process detected" "Consider Bitdefender + scheduled Malwarebytes scans" "av.engine.detected" ;;
+  0)
+    if [[ "$REDACT" == "true" ]]; then
+      warn "No antivirus / EDR process detected" "Consider one reputable real-time engine plus scheduled second-opinion scans." "av.engine.detected"
+    else
+      warn "No antivirus / EDR process detected" "Consider Bitdefender + scheduled Malwarebytes scans" "av.engine.detected"
+    fi
+    ;;
   1)
     if [[ "$REDACT" == "true" ]]; then
       pass "AV/EDR running (1 engine)" "av.engine.detected"
@@ -1159,14 +1210,31 @@ section_08_av_endpoint() {
 
   if [[ ${#OBJSEE_INSTALLED[@]} -gt 0 ]]; then
     if [[ ${#OBJSEE_RUNNING[@]} -gt 0 ]]; then
-      pass "Objective-See tools installed (${#OBJSEE_INSTALLED[@]}): ${OBJSEE_INSTALLED[*]}" "av.objsee.installed"
-      pass "Objective-See tools running: ${OBJSEE_RUNNING[*]}" "av.objsee.running"
+      if [[ "$REDACT" == "true" ]]; then
+        pass "Objective-See tools installed (${#OBJSEE_INSTALLED[@]})" "av.objsee.installed"
+        pass "${#OBJSEE_RUNNING[@]} Objective-See tool(s) running" "av.objsee.running"
+      else
+        pass "Objective-See tools installed (${#OBJSEE_INSTALLED[@]}): ${OBJSEE_INSTALLED[*]}" "av.objsee.installed"
+        pass "Objective-See tools running: ${OBJSEE_RUNNING[*]}" "av.objsee.running"
+      fi
     else
-      pass "Objective-See tools installed (${#OBJSEE_INSTALLED[@]}): ${OBJSEE_INSTALLED[*]}" "av.objsee.installed"
-      warn "Installed but not running" "Open the apps to enable monitoring (LuLu/BlockBlock/OverSight need to run to do anything)" "av.objsee.running"
+      if [[ "$REDACT" == "true" ]]; then
+        pass "Objective-See tools installed (${#OBJSEE_INSTALLED[@]})" "av.objsee.installed"
+      else
+        pass "Objective-See tools installed (${#OBJSEE_INSTALLED[@]}): ${OBJSEE_INSTALLED[*]}" "av.objsee.installed"
+      fi
+      if [[ "$REDACT" == "true" ]]; then
+        warn "Installed but not running" "Open the monitoring apps to enable their protections." "av.objsee.running"
+      else
+        warn "Installed but not running" "Open the apps to enable monitoring (LuLu/BlockBlock/OverSight need to run to do anything)" "av.objsee.running"
+      fi
     fi
   else
-    skip "No Objective-See tools detected" "Optional: BlockBlock + OverSight + RansomWhere? are free, lightweight, high-signal" "av.objsee.installed"
+    if [[ "$REDACT" == "true" ]]; then
+      skip "No supplemental macOS security tools detected" "Optional: add lightweight persistence, mic/camera, or ransomware behavior monitors." "av.objsee.installed"
+    else
+      skip "No Objective-See tools detected" "Optional: BlockBlock + OverSight + RansomWhere? are free, lightweight, high-signal" "av.objsee.installed"
+    fi
   fi
 
   # Browser-side AV/protection extensions — ID first, fall back to manifest name.
@@ -1174,36 +1242,48 @@ section_08_av_endpoint() {
   [[ -z "$TL_IN" ]] && TL_IN=$(detect_ext_by_name "TrafficLight|Bitdefender Web")
   if [[ -n "$TL_IN" ]]; then
     if [[ "$REDACT" == "true" ]]; then
-      pass "Bitdefender TrafficLight installed" "av.browser.trafficlight"
+      pass "Browser traffic-protection extension installed" "av.browser.trafficlight"
     else
       pass "Bitdefender TrafficLight installed in: $TL_IN" "av.browser.trafficlight"
     fi
   else
-    skip "Bitdefender TrafficLight not installed in any Chromium browser" "" "av.browser.trafficlight"
+    if [[ "$REDACT" == "true" ]]; then
+      skip "Browser traffic-protection extension not detected" "" "av.browser.trafficlight"
+    else
+      skip "Bitdefender TrafficLight not installed in any Chromium browser" "" "av.browser.trafficlight"
+    fi
   fi
 
   MBG_IN=$(detect_ext_in_chromium "ihcjicgdanjaechkgeegckofjjedodee")
   [[ -z "$MBG_IN" ]] && MBG_IN=$(detect_ext_by_name "Malwarebytes")
   if [[ -n "$MBG_IN" ]]; then
     if [[ "$REDACT" == "true" ]]; then
-      pass "Malwarebytes Browser Guard extension installed" "av.browser.malwarebytes"
+      pass "Browser malware-protection extension installed" "av.browser.malwarebytes"
     else
       pass "Malwarebytes Browser Guard extension installed in: $MBG_IN" "av.browser.malwarebytes"
     fi
   else
-    skip "Malwarebytes Browser Guard browser-extension not detected" "Distinct from the standalone Malwarebytes app's Web Protection (which filters domains system-wide and is captured by av.engine.detected). Browser Guard is the per-browser extension that adds an extra in-page layer." "av.browser.malwarebytes"
+    if [[ "$REDACT" == "true" ]]; then
+      skip "Browser malware-protection extension not detected" "Distinct from standalone endpoint protection. A per-browser extension can add an extra in-page layer." "av.browser.malwarebytes"
+    else
+      skip "Malwarebytes Browser Guard browser-extension not detected" "Distinct from the standalone Malwarebytes app's Web Protection (which filters domains system-wide and is captured by av.engine.detected). Browser Guard is the per-browser extension that adds an extra in-page layer." "av.browser.malwarebytes"
+    fi
   fi
 
   BDAT_IN=$(detect_ext_in_chromium "diffjaobnnkecbnaaippiljneoamenfm")
   [[ -z "$BDAT_IN" ]] && BDAT_IN=$(detect_ext_by_name "Anti.?Tracker|Bitdefender Anti")
   if [[ -n "$BDAT_IN" ]]; then
     if [[ "$REDACT" == "true" ]]; then
-      pass "Bitdefender Anti-Tracker installed" "av.browser.antitracker"
+      pass "Browser anti-tracker extension installed" "av.browser.antitracker"
     else
       pass "Bitdefender Anti-Tracker installed in: $BDAT_IN" "av.browser.antitracker"
     fi
   else
-    skip "Bitdefender Anti-Tracker not detected" "" "av.browser.antitracker"
+    if [[ "$REDACT" == "true" ]]; then
+      skip "Browser anti-tracker extension not detected" "" "av.browser.antitracker"
+    else
+      skip "Bitdefender Anti-Tracker not detected" "" "av.browser.antitracker"
+    fi
   fi
 
 }
@@ -1230,13 +1310,25 @@ section_09_browsers() {
   case ${#BROWSERS_FOUND[@]} in
   0) : ;;
   1 | 2)
-    pass "${#BROWSERS_FOUND[@]} browser(s) installed: ${BROWSERS_FOUND[*]} — good blast-radius separation" "browser.installed"
+    if [[ "$REDACT" == "true" ]]; then
+      pass "${#BROWSERS_FOUND[@]} browser(s) installed — good blast-radius separation" "browser.installed"
+    else
+      pass "${#BROWSERS_FOUND[@]} browser(s) installed: ${BROWSERS_FOUND[*]} — good blast-radius separation" "browser.installed"
+    fi
     ;;
   3)
-    warn "3 browsers installed: ${BROWSERS_FOUND[*]}" "Defensible if one is for compatibility testing. Each browser is a separate extension store, autofill keyring, and cookie jar; the 4th adds attack surface without much marginal value." "browser.installed"
+    if [[ "$REDACT" == "true" ]]; then
+      warn "3 browsers installed" "Defensible if one is for compatibility testing. Each browser is a separate extension store, autofill keyring, and cookie jar; the 4th adds attack surface without much marginal value." "browser.installed"
+    else
+      warn "3 browsers installed: ${BROWSERS_FOUND[*]}" "Defensible if one is for compatibility testing. Each browser is a separate extension store, autofill keyring, and cookie jar; the 4th adds attack surface without much marginal value." "browser.installed"
+    fi
     ;;
   *)
-    warn "${#BROWSERS_FOUND[@]} browsers installed: ${BROWSERS_FOUND[*]}" "Sweet spot is 1-2 browsers (e.g. Safari for general use + Brave/Arc for wallets and dev). Each extra browser is a separate extension store / autofill keyring / cookie jar. Remove the ones you no longer use." "browser.installed"
+    if [[ "$REDACT" == "true" ]]; then
+      warn "${#BROWSERS_FOUND[@]} browsers installed" "Sweet spot is 1-2 browsers. Each extra browser is a separate extension store / autofill keyring / cookie jar. Remove the ones you no longer use." "browser.installed"
+    else
+      warn "${#BROWSERS_FOUND[@]} browsers installed: ${BROWSERS_FOUND[*]}" "Sweet spot is 1-2 browsers (e.g. Safari for general use + Brave/Arc for wallets and dev). Each extra browser is a separate extension store / autofill keyring / cookie jar. Remove the ones you no longer use." "browser.installed"
+    fi
     ;;
   esac
 
@@ -1255,12 +1347,38 @@ section_09_browsers() {
   done
 
   case "$(echo "$DEFAULT_BROWSER" | tr '[:upper:]' '[:lower:]')" in
-  com.apple.safari) pass "Default browser: Safari (recommended baseline)" "browser.default" ;;
-  com.brave.browser) warn "Default browser: Brave" "Safari recommended as default — random links open with smaller blast radius" "browser.default" ;;
-  com.google.chrome) warn "Default browser: Chrome" "Safari recommended as default for non-work / non-wallet links" "browser.default" ;;
-  org.mozilla.firefox) skip "Default browser: Firefox" "" "browser.default" ;;
-  com.microsoft.edgemac) skip "Default browser: Edge" "" "browser.default" ;;
-  company.thebrowser.browser) skip "Default browser: Arc" "" "browser.default" ;;
+  com.apple.safari)
+    if [[ "$REDACT" == "true" ]]; then
+      pass "Default browser uses recommended baseline" "browser.default"
+    else
+      pass "Default browser: Safari (recommended baseline)" "browser.default"
+    fi
+    ;;
+  com.brave.browser)
+    if [[ "$REDACT" == "true" ]]; then
+      warn "Default browser is not the recommended baseline" "Safari recommended as default — random links open with smaller blast radius" "browser.default"
+    else
+      warn "Default browser: Brave" "Safari recommended as default — random links open with smaller blast radius" "browser.default"
+    fi
+    ;;
+  com.google.chrome)
+    if [[ "$REDACT" == "true" ]]; then
+      warn "Default browser is not the recommended baseline" "Safari recommended as default for non-work / non-wallet links" "browser.default"
+    else
+      warn "Default browser: Chrome" "Safari recommended as default for non-work / non-wallet links" "browser.default"
+    fi
+    ;;
+  org.mozilla.firefox | com.microsoft.edgemac | company.thebrowser.browser)
+    if [[ "$REDACT" == "true" ]]; then
+      skip "Default browser: mainstream non-Safari browser" "" "browser.default"
+    else
+      case "$(echo "$DEFAULT_BROWSER" | tr '[:upper:]' '[:lower:]')" in
+      org.mozilla.firefox) skip "Default browser: Firefox" "" "browser.default" ;;
+      com.microsoft.edgemac) skip "Default browser: Edge" "" "browser.default" ;;
+      company.thebrowser.browser) skip "Default browser: Arc" "" "browser.default" ;;
+      esac
+    fi
+    ;;
   "") skip "Default browser: could not parse" "Verify: System Settings → Desktop & Dock → Default web browser" "browser.default" ;;
   *)
     if [[ "$REDACT" == "true" ]]; then
@@ -1302,7 +1420,7 @@ section_10_browser_extensions() {
 
   if [[ ${#PROTECTIVE_FOUND[@]} -gt 0 ]]; then
     pass "Protective extensions present:" "ext.protective"
-    if [[ "$MODE" != "json" ]]; then
+    if [[ "$MODE" != "json" && "$REDACT" != "true" ]]; then
       for r in "${PROTECTIVE_FOUND[@]}"; do printf "          %s· %s%s\n" "$DIM" "$r" "$NC"; done
     fi
   else
@@ -1325,7 +1443,13 @@ section_10_browser_extensions() {
     done
 
     if [[ -z "$WG_IN" && -z "$PU_IN" ]]; then
-      if $HAS_METAMASK; then
+      if [[ "$REDACT" == "true" ]]; then
+        if $HAS_RABBY; then
+          pass "No external simulator detected; wallet has built-in transaction simulation" "ext.simulator.advice"
+        else
+          warn "No external transaction simulator detected" "Install one alongside your wallet — catches malicious approvals before signing." "ext.simulator.advice"
+        fi
+      elif $HAS_METAMASK; then
         warn "No external transaction simulator, and MetaMask is installed" "MetaMask's built-in preview is weak. Install Wallet Guard or Pocket Universe — they catch off-chain (EIP-712 / Permit) drain attacks MetaMask alone misses." "ext.simulator.advice"
       elif $HAS_RABBY; then
         pass "No external simulator — but Rabby has solid built-in transaction simulation" "ext.simulator.advice"
@@ -1335,8 +1459,8 @@ section_10_browser_extensions() {
       fi
     else
       if [[ "$REDACT" == "true" ]]; then
-        [[ -n "$WG_IN" ]] && pass "Wallet Guard installed" "ext.simulator.walletguard"
-        [[ -n "$PU_IN" ]] && pass "Pocket Universe installed" "ext.simulator.pocketuniverse"
+        [[ -n "$WG_IN" ]] && pass "Transaction simulator extension installed" "ext.simulator.walletguard"
+        [[ -n "$PU_IN" ]] && pass "Transaction simulator extension installed" "ext.simulator.pocketuniverse"
       else
         [[ -n "$WG_IN" ]] && pass "Wallet Guard installed in: $WG_IN" "ext.simulator.walletguard"
         [[ -n "$PU_IN" ]] && pass "Pocket Universe installed in: $PU_IN" "ext.simulator.pocketuniverse"
@@ -1391,37 +1515,35 @@ section_10_browser_extensions() {
     done
     SAFARI_EXT_COUNT=$(echo "$SAFARI_EXT_DUMP" | wc -l | tr -d ' ')
     if [[ ${#SAFARI_WALLET[@]} -gt 0 ]]; then
-      warn "Safari wallet extension(s): ${SAFARI_WALLET[*]}" "Wallet exposure on the same browser used for general browsing is the highest crypto-specific risk." "ext.safari.wallet"
+      if [[ "$REDACT" == "true" ]]; then
+        warn "${#SAFARI_WALLET[@]} Safari wallet extension(s) detected" "Wallet exposure on the same browser used for general browsing is the highest crypto-specific risk." "ext.safari.wallet"
+      else
+        warn "Safari wallet extension(s): ${SAFARI_WALLET[*]}" "Wallet exposure on the same browser used for general browsing is the highest crypto-specific risk." "ext.safari.wallet"
+      fi
     fi
     if [[ ${#SAFARI_PROTECTIVE[@]} -gt 0 ]]; then
-      pass "Safari protective extension(s): ${SAFARI_PROTECTIVE[*]}" "ext.safari.protective"
+      if [[ "$REDACT" == "true" ]]; then
+        pass "${#SAFARI_PROTECTIVE[@]} Safari protective extension(s) detected" "ext.safari.protective"
+      else
+        pass "Safari protective extension(s): ${SAFARI_PROTECTIVE[*]}" "ext.safari.protective"
+      fi
     fi
     skip "Safari has $SAFARI_EXT_COUNT extension(s) registered with pluginkit" "Audit: Safari → Settings → Extensions. Each extension can read pages it has been granted access to." "ext.safari.total"
   fi
 
-  # Firefox extensions — extensions.json is JSON. We prefer Python's stdlib
-  # (always shipped on macOS, but the /usr/bin/python3 stub triggers an Xcode
-  # CLT install prompt on machines where CLT isn't present yet). Skip cleanly
-  # if python3 isn't available so the audit never blocks on an installer.
+  # Firefox extensions — parse extensions.json conservatively with stock text
+  # tools. This is intentionally not a full JSON parser; it extracts enough
+  # extension display names for posture classification without pulling in
+  # python3 (which can trigger an Xcode CLT install prompt on fresh macOS).
   FF_PROFILES_ROOT="$HOME/Library/Application Support/Firefox/Profiles"
-  if [[ -d "$FF_PROFILES_ROOT" ]] && command -v python3 >/dev/null 2>&1; then
-    FF_EXT_DUMP=$(
-      python3 - "$FF_PROFILES_ROOT" <<'PY' 2>/dev/null || true
-import json, sys, glob, os
-root = sys.argv[1]
-seen = []
-for path in glob.glob(os.path.join(root, "*", "extensions.json")):
-    try:
-        d = json.load(open(path))
-    except Exception:
-        continue
-    for a in d.get("addons", []):
-        name = a.get("defaultLocale", {}).get("name") or a.get("id", "")
-        if name:
-            seen.append(name)
-print("\n".join(seen))
-PY
-    )
+  if [[ -d "$FF_PROFILES_ROOT" ]]; then
+    FF_EXT_DUMP=""
+    while IFS= read -r ff_json; do
+      [[ -f "$ff_json" ]] || continue
+      names=$(grep -E '"name"[[:space:]]*:' "$ff_json" 2>/dev/null | sed -E 's/.*"name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' | grep -v '^$' || true)
+      [[ -n "$names" ]] && FF_EXT_DUMP="${FF_EXT_DUMP}${FF_EXT_DUMP:+
+}${names}"
+    done < <(find "$FF_PROFILES_ROOT" -name extensions.json -type f 2>/dev/null)
     FF_PROTECTIVE=()
     FF_WALLET=()
     if [[ -n "$FF_EXT_DUMP" ]]; then
@@ -1438,16 +1560,21 @@ PY
       FF_EXT_COUNT=$(echo "$FF_EXT_DUMP" | grep -c '.' || true)
       FF_EXT_COUNT=${FF_EXT_COUNT:-0}
       if [[ ${#FF_WALLET[@]} -gt 0 ]]; then
-        warn "Firefox wallet extension(s): ${FF_WALLET[*]}" "Move wallet to a dedicated browser/profile that you don't use for general web browsing." "ext.firefox.wallet"
+        if [[ "$REDACT" == "true" ]]; then
+          warn "${#FF_WALLET[@]} Firefox wallet extension(s) detected" "Move wallet to a dedicated browser/profile that you don't use for general web browsing." "ext.firefox.wallet"
+        else
+          warn "Firefox wallet extension(s): ${FF_WALLET[*]}" "Move wallet to a dedicated browser/profile that you don't use for general web browsing." "ext.firefox.wallet"
+        fi
       fi
       if [[ ${#FF_PROTECTIVE[@]} -gt 0 ]]; then
-        pass "Firefox protective extension(s): ${FF_PROTECTIVE[*]}" "ext.firefox.protective"
+        if [[ "$REDACT" == "true" ]]; then
+          pass "${#FF_PROTECTIVE[@]} Firefox protective extension(s) detected" "ext.firefox.protective"
+        else
+          pass "Firefox protective extension(s): ${FF_PROTECTIVE[*]}" "ext.firefox.protective"
+        fi
       fi
       skip "Firefox has $FF_EXT_COUNT extension(s) across all profiles" "Audit: about:addons. Disable anything you no longer use." "ext.firefox.total"
     fi
-  elif [[ -d "$FF_PROFILES_ROOT" ]]; then
-    # Firefox is installed but python3 is missing — don't trigger CLT install.
-    skip "Firefox profiles found but python3 unavailable — extensions not enumerated" "Install Xcode Command Line Tools (xcode-select --install) to enable Firefox extension parsing." "ext.firefox.total"
   fi
 
 }
@@ -1473,8 +1600,8 @@ section_11_ssh() {
     [[ -f "$k" ]] || continue
     # ssh-keygen -y -P '' tries to read the public half with empty passphrase.
     # Succeeds only if the key is unencrypted.
-    SSH_KEYGEN_ERR=$(ssh-keygen -y -P "" -f "$k" 2>&1 >/dev/null)
-    SSH_KEYGEN_STATUS=$?
+    SSH_KEYGEN_STATUS=0
+    SSH_KEYGEN_ERR=$(ssh-keygen -y -P "" -f "$k" 2>&1 >/dev/null) || SSH_KEYGEN_STATUS=$?
     if [[ "$SSH_KEYGEN_STATUS" -eq 0 ]]; then
       UNENCRYPTED_KEYS+=("$(basename "$k")")
     elif echo "$SSH_KEYGEN_ERR" | grep -qi "incorrect passphrase"; then
@@ -1484,13 +1611,25 @@ section_11_ssh() {
     fi
   done
   if [[ ${#UNENCRYPTED_KEYS[@]} -gt 0 ]]; then
-    warn "Unencrypted SSH private key(s) on disk: ${UNENCRYPTED_KEYS[*]}" "Migrate to 1Password SSH agent / Secretive, OR add a passphrase: ssh-keygen -p -f ~/.ssh/<keyfile>" "ssh.keys.unencrypted"
+    if [[ "$REDACT" == "true" ]]; then
+      warn "Unencrypted SSH private key(s) on disk: ${#UNENCRYPTED_KEYS[@]}" "Move keys to an external SSH agent, or add a passphrase: ssh-keygen -p -f ~/.ssh/<keyfile>" "ssh.keys.unencrypted"
+    else
+      warn "Unencrypted SSH private key(s) on disk: ${UNENCRYPTED_KEYS[*]}" "Migrate to 1Password SSH agent / Secretive, OR add a passphrase: ssh-keygen -p -f ~/.ssh/<keyfile>" "ssh.keys.unencrypted"
+    fi
   fi
   if [[ ${#ENCRYPTED_KEYS[@]} -gt 0 ]]; then
-    pass "SSH private key(s) appear passphrase-protected: ${ENCRYPTED_KEYS[*]}" "ssh.keys.encrypted"
+    if [[ "$REDACT" == "true" ]]; then
+      pass "SSH private key(s) appear passphrase-protected: ${#ENCRYPTED_KEYS[@]}" "ssh.keys.encrypted"
+    else
+      pass "SSH private key(s) appear passphrase-protected: ${ENCRYPTED_KEYS[*]}" "ssh.keys.encrypted"
+    fi
   fi
   if [[ ${#UNKNOWN_KEYS[@]} -gt 0 ]]; then
-    warn "SSH private key(s) could not be classified: ${UNKNOWN_KEYS[*]}" "Inspect manually; ssh-keygen could not read these keys for a reason other than an incorrect empty passphrase." "ssh.keys.unknown"
+    if [[ "$REDACT" == "true" ]]; then
+      warn "SSH private key(s) could not be classified: ${#UNKNOWN_KEYS[@]}" "Inspect manually; ssh-keygen could not read these keys for a reason other than an incorrect empty passphrase." "ssh.keys.unknown"
+    else
+      warn "SSH private key(s) could not be classified: ${UNKNOWN_KEYS[*]}" "Inspect manually; ssh-keygen could not read these keys for a reason other than an incorrect empty passphrase." "ssh.keys.unknown"
+    fi
   fi
   if [[ ${#UNENCRYPTED_KEYS[@]} -eq 0 && ${#ENCRYPTED_KEYS[@]} -eq 0 && ${#UNKNOWN_KEYS[@]} -eq 0 ]]; then
     pass "No private SSH keys in ~/.ssh/" "ssh.keys.none"
@@ -1498,17 +1637,47 @@ section_11_ssh() {
 
   ONEP_SOCK="$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
   if [[ -S "$ONEP_SOCK" ]]; then
-    pass "1Password SSH agent socket present" "ssh.agent.1password"
+    if [[ "$REDACT" == "true" ]]; then
+      pass "External SSH agent socket present" "ssh.agent.1password"
+    else
+      pass "1Password SSH agent socket present" "ssh.agent.1password"
+    fi
   elif [[ -e "$ONEP_SOCK" ]]; then
-    warn "1Password agent path exists but is not a socket" "" "ssh.agent.1password"
+    if [[ "$REDACT" == "true" ]]; then
+      warn "External SSH agent path exists but is not a socket" "" "ssh.agent.1password"
+    else
+      warn "1Password agent path exists but is not a socket" "" "ssh.agent.1password"
+    fi
   else
-    skip "No 1Password SSH agent socket" "Optional: 1Password → Settings → Developer → Use the SSH agent" "ssh.agent.1password"
+    if [[ "$REDACT" == "true" ]]; then
+      skip "No external SSH agent socket detected" "Optional: use an external SSH agent so private keys do not need to sit unprotected on disk." "ssh.agent.1password"
+    else
+      skip "No 1Password SSH agent socket" "Optional: 1Password → Settings → Developer → Use the SSH agent" "ssh.agent.1password"
+    fi
   fi
 
   case "${SSH_AUTH_SOCK:-}" in
-  *1password*) pass "SSH_AUTH_SOCK → 1Password agent" "ssh.authsock" ;;
-  */secretive*) pass "SSH_AUTH_SOCK → Secretive (Secure Enclave)" "ssh.authsock" ;;
-  /var/run/com.apple.launchd*) warn "SSH_AUTH_SOCK → macOS default ssh-agent" "Point at 1Password or Secretive in your shell rc" "ssh.authsock" ;;
+  *1password*)
+    if [[ "$REDACT" == "true" ]]; then
+      pass "SSH_AUTH_SOCK points to an external SSH agent" "ssh.authsock"
+    else
+      pass "SSH_AUTH_SOCK → 1Password agent" "ssh.authsock"
+    fi
+    ;;
+  */secretive*)
+    if [[ "$REDACT" == "true" ]]; then
+      pass "SSH_AUTH_SOCK points to a Secure Enclave SSH agent" "ssh.authsock"
+    else
+      pass "SSH_AUTH_SOCK → Secretive (Secure Enclave)" "ssh.authsock"
+    fi
+    ;;
+  /var/run/com.apple.launchd*)
+    if [[ "$REDACT" == "true" ]]; then
+      warn "SSH_AUTH_SOCK points to the macOS default ssh-agent" "Point at an external SSH agent in your shell rc." "ssh.authsock"
+    else
+      warn "SSH_AUTH_SOCK → macOS default ssh-agent" "Point at 1Password or Secretive in your shell rc" "ssh.authsock"
+    fi
+    ;;
   "") skip "SSH_AUTH_SOCK is unset in this shell" "" "ssh.authsock" ;;
   *) skip "SSH_AUTH_SOCK: $(redact path "${SSH_AUTH_SOCK}")" "" "ssh.authsock" ;;
   esac
@@ -1551,11 +1720,19 @@ section_11_ssh() {
   if [[ "$no_keys" == "pass" ]]; then
     pass "SSH posture: no on-disk private keys" "ssh.posture"
   elif [[ "$unenc" == "warn" || "$unenc" == "fail" ]] && ! $ext_agent; then
-    fail "SSH posture: unencrypted on-disk keys with no external agent" "Either add a passphrase ('ssh-keygen -p -f ~/.ssh/<key>') or move to 1Password / Secretive SSH agent so the key never leaves the agent." "ssh.posture"
+    if [[ "$REDACT" == "true" ]]; then
+      fail "SSH posture: unencrypted on-disk keys with no external agent" "Either add a passphrase ('ssh-keygen -p -f ~/.ssh/<key>') or move to an external SSH agent so the key never leaves the agent." "ssh.posture"
+    else
+      fail "SSH posture: unencrypted on-disk keys with no external agent" "Either add a passphrase ('ssh-keygen -p -f ~/.ssh/<key>') or move to 1Password / Secretive SSH agent so the key never leaves the agent." "ssh.posture"
+    fi
   elif [[ "$unenc" == "warn" || "$unenc" == "fail" ]] && $ext_agent; then
     warn "SSH posture: unencrypted keys still on disk despite external agent" "Add a passphrase to the on-disk key, or remove it entirely if the agent already holds the equivalent." "ssh.posture"
   elif [[ "$enc" == "pass" ]] && ! $ext_agent; then
-    warn "SSH posture: encrypted keys but no external agent — passphrase entry on every use" "Optional improvement: 1Password SSH agent or Secretive (Secure Enclave) so the key is unlocked once per session." "ssh.posture"
+    if [[ "$REDACT" == "true" ]]; then
+      warn "SSH posture: encrypted keys but no external agent — passphrase entry on every use" "Optional improvement: use an external SSH agent so the key is unlocked once per session." "ssh.posture"
+    else
+      warn "SSH posture: encrypted keys but no external agent — passphrase entry on every use" "Optional improvement: 1Password SSH agent or Secretive (Secure Enclave) so the key is unlocked once per session." "ssh.posture"
+    fi
   else
     pass "SSH posture: encrypted keys with external agent" "ssh.posture"
   fi
@@ -2045,13 +2222,29 @@ section_15_password_2fa() {
   section "15 · Password Manager & 2FA Hardware"
 
   if pgrep -qi "1Password" 2>/dev/null; then
-    pass "1Password is running" "pwmgr.running"
+    if [[ "$REDACT" == "true" ]]; then
+      pass "Password manager is running" "pwmgr.running"
+    else
+      pass "1Password is running" "pwmgr.running"
+    fi
   elif pgrep -qi "bitwarden" 2>/dev/null; then
-    pass "Bitwarden is running" "pwmgr.running"
+    if [[ "$REDACT" == "true" ]]; then
+      pass "Password manager is running" "pwmgr.running"
+    else
+      pass "Bitwarden is running" "pwmgr.running"
+    fi
   elif pgrep -qi "dashlane" 2>/dev/null; then
-    pass "Dashlane is running" "pwmgr.running"
+    if [[ "$REDACT" == "true" ]]; then
+      pass "Password manager is running" "pwmgr.running"
+    else
+      pass "Dashlane is running" "pwmgr.running"
+    fi
   else
-    warn "No password manager process detected" "1Password / Bitwarden recommended; macOS Keychain alone is not enough for high-value secrets" "pwmgr.running"
+    if [[ "$REDACT" == "true" ]]; then
+      warn "No password manager process detected" "Use a reputable password manager for high-value secrets; macOS Keychain alone is a weaker posture." "pwmgr.running"
+    else
+      warn "No password manager process detected" "1Password / Bitwarden recommended; macOS Keychain alone is not enough for high-value secrets" "pwmgr.running"
+    fi
   fi
 
   # FIDO2 / 2FA hardware-key tooling — distinct from crypto hardware wallets.
@@ -2068,12 +2261,24 @@ section_15_password_2fa() {
   command -v solo >/dev/null 2>&1 && HW_2FA_FOUND+=("solo-cli")
 
   if [[ ${#HW_2FA_FOUND[@]} -gt 0 ]]; then
-    pass "FIDO2 / 2FA hardware-key tooling: ${HW_2FA_FOUND[*]}" "twofa.hardware.installed"
+    if [[ "$REDACT" == "true" ]]; then
+      pass "FIDO2 / 2FA hardware-key tooling detected (${#HW_2FA_FOUND[@]})" "twofa.hardware.installed"
+    else
+      pass "FIDO2 / 2FA hardware-key tooling: ${HW_2FA_FOUND[*]}" "twofa.hardware.installed"
+    fi
   else
     if [[ -d "/Applications/Ledger Live.app" ]]; then
-      skip "No dedicated FIDO2/YubiKey tooling — Ledger can cover this role" "Install the 'FIDO U2F' app on your Ledger (Ledger Live → My Ledger → Apps → FIDO U2F) to use it as a hardware key for account 2FA. Or buy a YubiKey for cleaner UX (Ledger = crypto signing; YubiKey = account 2FA)." "twofa.hardware.installed"
+      if [[ "$REDACT" == "true" ]]; then
+        skip "No dedicated FIDO2 hardware-key tooling — hardware wallet may cover this role" "Some hardware wallets can also act as a FIDO/U2F security key. Verify support in the vendor app, or use a dedicated hardware security key for cleaner UX." "twofa.hardware.installed"
+      else
+        skip "No dedicated FIDO2/YubiKey tooling — Ledger can cover this role" "Install the 'FIDO U2F' app on your Ledger (Ledger Live → My Ledger → Apps → FIDO U2F) to use it as a hardware key for account 2FA. Or buy a YubiKey for cleaner UX (Ledger = crypto signing; YubiKey = account 2FA)." "twofa.hardware.installed"
+      fi
     else
-      skip "No FIDO2 hardware-key tooling detected" "Recommended for high-value accounts: YubiKey 5C NFC (~\$55). Use for 1Password, GitHub, Apple ID, Google, exchanges. Crypto wallets need a separate device (Ledger/Trezor)." "twofa.hardware.installed"
+      if [[ "$REDACT" == "true" ]]; then
+        skip "No FIDO2 hardware-key tooling detected" "Recommended for high-value accounts. Crypto signing and account 2FA should generally use separate hardware roots." "twofa.hardware.installed"
+      else
+        skip "No FIDO2 hardware-key tooling detected" "Recommended for high-value accounts: YubiKey 5C NFC (~\$55). Use for 1Password, GitHub, Apple ID, Google, exchanges. Crypto wallets need a separate device (Ledger/Trezor)." "twofa.hardware.installed"
+      fi
     fi
   fi
 
@@ -2091,9 +2296,17 @@ section_16_hardware_wallet() {
   [[ -d "/Applications/Keystone.app" ]] && HW_APPS+=("Keystone")
   [[ -d "/Applications/GridPlus Lattice1.app" ]] && HW_APPS+=("GridPlus Lattice1")
   if [[ ${#HW_APPS[@]} -gt 0 ]]; then
-    pass "Hardware wallet app(s) installed: ${HW_APPS[*]}" "wallet.hw.installed"
+    if [[ "$REDACT" == "true" ]]; then
+      pass "Hardware wallet app(s) installed (${#HW_APPS[@]})" "wallet.hw.installed"
+    else
+      pass "Hardware wallet app(s) installed: ${HW_APPS[*]}" "wallet.hw.installed"
+    fi
   else
-    skip "No hardware wallet app detected" "Strongly recommended: Ledger or Trezor for any non-trivial holdings" "wallet.hw.installed"
+    if [[ "$REDACT" == "true" ]]; then
+      skip "No hardware wallet app detected" "Strongly recommended for any non-trivial holdings." "wallet.hw.installed"
+    else
+      skip "No hardware wallet app detected" "Strongly recommended: Ledger or Trezor for any non-trivial holdings" "wallet.hw.installed"
+    fi
   fi
 
   # Composite: FIDO2 hardware-key gap when a crypto hardware wallet is
@@ -2105,7 +2318,11 @@ section_16_hardware_wallet() {
   hw=$(_status_of "wallet.hw.installed")
   twofa=$(_status_of "twofa.hardware.installed")
   if [[ "$hw" == "pass" && "$twofa" != "pass" ]]; then
-    skip "FIDO2 gap: hardware wallet present but no dedicated FIDO2 key" "Free upgrade: install the 'FIDO U2F' app on your Ledger (Ledger Live → My Ledger → Apps → FIDO U2F). Same device covers crypto signing AND account 2FA." "twofa.fido_gap"
+    if [[ "$REDACT" == "true" ]]; then
+      skip "FIDO2 gap: hardware wallet present but no dedicated FIDO2 key" "Some hardware wallets can act as FIDO/U2F keys. Verify support in the vendor app, or add a dedicated hardware security key for account 2FA." "twofa.fido_gap"
+    else
+      skip "FIDO2 gap: hardware wallet present but no dedicated FIDO2 key" "Free upgrade: install the 'FIDO U2F' app on your Ledger (Ledger Live → My Ledger → Apps → FIDO U2F). Same device covers crypto signing AND account 2FA." "twofa.fido_gap"
+    fi
   elif [[ "$hw" == "pass" && "$twofa" == "pass" ]]; then
     pass "FIDO2 + hardware wallet both available" "twofa.fido_gap"
   else
@@ -2226,9 +2443,17 @@ section_18_backups() {
   [[ -d "/Applications/Arq.app" ]] || [[ -d "/Applications/Arq 7.app" ]] && BACKUP_FOUND+=("Arq")
   [[ -d "/Applications/Restic.app" ]] && BACKUP_FOUND+=("Restic")
   if [[ ${#BACKUP_FOUND[@]} -gt 0 ]]; then
-    pass "Offsite/secondary backup tool(s): ${BACKUP_FOUND[*]}" "backup.offsite"
+    if [[ "$REDACT" == "true" ]]; then
+      pass "Offsite/secondary backup tool(s) detected (${#BACKUP_FOUND[@]})" "backup.offsite"
+    else
+      pass "Offsite/secondary backup tool(s): ${BACKUP_FOUND[*]}" "backup.offsite"
+    fi
   else
-    warn "No offsite backup tool detected" "Recommended: Backblaze with personal encryption key (offsite, encrypted)" "backup.offsite"
+    if [[ "$REDACT" == "true" ]]; then
+      warn "No offsite backup tool detected" "Recommended: offsite encrypted backup with a private encryption key." "backup.offsite"
+    else
+      warn "No offsite backup tool detected" "Recommended: Backblaze with personal encryption key (offsite, encrypted)" "backup.offsite"
+    fi
   fi
 
   # File-encryption tools
@@ -2237,7 +2462,11 @@ section_18_backups() {
   [[ -d "/Applications/VeraCrypt.app" ]] && ENC_FOUND+=("VeraCrypt")
   [[ -d "/Applications/Encrypto.app" ]] && ENC_FOUND+=("Encrypto")
   if [[ ${#ENC_FOUND[@]} -gt 0 ]]; then
-    pass "File encryption tool(s): ${ENC_FOUND[*]}" "backup.encryption"
+    if [[ "$REDACT" == "true" ]]; then
+      pass "File encryption tool(s) detected (${#ENC_FOUND[@]})" "backup.encryption"
+    else
+      pass "File encryption tool(s): ${ENC_FOUND[*]}" "backup.encryption"
+    fi
   fi
 
   # Composite: backup recovery path.
@@ -2280,11 +2509,23 @@ section_18_backups() {
     primary=$($have_tm && echo "Time Machine" || echo "offsite")
     pass "Backup recovery path: $primary + iCloud Drive — full disk via $primary, documents redundant via iCloud" "backup.recovery_path"
   elif $have_tm || $have_offsite; then
-    warn "Backup recovery path: single source — second source recommended" "Either pair Time Machine with an offsite (Backblaze / Arq), or run two offsites. Both encrypted at rest." "backup.recovery_path"
+    if [[ "$REDACT" == "true" ]]; then
+      warn "Backup recovery path: single source — second source recommended" "Pair local full-disk backup with an offsite encrypted backup, or run two independent offsite backups." "backup.recovery_path"
+    else
+      warn "Backup recovery path: single source — second source recommended" "Either pair Time Machine with an offsite (Backblaze / Arq), or run two offsites. Both encrypted at rest." "backup.recovery_path"
+    fi
   elif $have_icloud; then
-    warn "Backup recovery path: iCloud Drive sync only — PARTIAL recovery (documents only)" "iCloud Drive syncs ~/Documents and ~/Desktop (only if you enabled 'Desktop & Documents Folders'), Photos, and iCloud-aware app data. It does NOT cover /Applications, ~/Dev, brew installs, or system state. Deletes propagate (no ransomware resilience), versioning ≤30d. Add a Time Machine drive + an offsite (Backblaze / Arq) for full coverage. Verify Advanced Data Protection is on at Settings → Apple ID for E2E encryption." "backup.recovery_path"
+    if [[ "$REDACT" == "true" ]]; then
+      warn "Backup recovery path: cloud sync only — PARTIAL recovery (documents only)" "Cloud file sync does not cover applications, developer environments, package-manager state, or system state. Add local full-disk backup plus offsite encrypted backup for full coverage." "backup.recovery_path"
+    else
+      warn "Backup recovery path: iCloud Drive sync only — PARTIAL recovery (documents only)" "iCloud Drive syncs ~/Documents and ~/Desktop (only if you enabled 'Desktop & Documents Folders'), Photos, and iCloud-aware app data. It does NOT cover /Applications, ~/Dev, brew installs, or system state. Deletes propagate (no ransomware resilience), versioning ≤30d. Add a Time Machine drive + an offsite (Backblaze / Arq) for full coverage. Verify Advanced Data Protection is on at Settings → Apple ID for E2E encryption." "backup.recovery_path"
+    fi
   else
-    fail "Backup recovery path: NO source — disk loss is unrecoverable" "Configure Time Machine + Backblaze (or equivalent). At least one offsite, encrypted at rest. Ransomware, drive failure, and accidental rm all assume you have a backup. iCloud Drive alone is not a backup — it's sync." "backup.recovery_path"
+    if [[ "$REDACT" == "true" ]]; then
+      fail "Backup recovery path: NO source — disk loss is unrecoverable" "Configure local full-disk backup plus at least one encrypted offsite backup. Cloud file sync alone is not a backup." "backup.recovery_path"
+    else
+      fail "Backup recovery path: NO source — disk loss is unrecoverable" "Configure Time Machine + Backblaze (or equivalent). At least one offsite, encrypted at rest. Ransomware, drive failure, and accidental rm all assume you have a backup. iCloud Drive alone is not a backup — it's sync." "backup.recovery_path"
+    fi
   fi
 
 }
@@ -2364,6 +2605,12 @@ section_20_users_sudo() {
   # non-empty list → actual count in the label. The `|| true` neutralises
   # `set -o pipefail` when grep -v filters out everything (legit empty case).
   ADMIN_LIST=$(dscl . -read /Groups/admin GroupMembership 2>/dev/null | sed 's/GroupMembership: //' | tr ' ' '\n' | grep -v '^_' | grep -v '^root$' | grep -v '^$' | paste -sd, - || true)
+  if [[ -z "$ADMIN_LIST" ]]; then
+    # On some managed / newer macOS installs, dscl may omit GroupMembership
+    # even though the admin group is queryable through directory services.
+    # Fall back before giving up, but keep the no-false-PASS behavior.
+    ADMIN_LIST=$(dscacheutil -q group -a name admin 2>/dev/null | awk -F': ' '/^users:/ {print $2; exit}' | tr ' ' '\n' | grep -v '^_' | grep -v '^root$' | grep -v '^$' | paste -sd, - || true)
+  fi
   if [[ -z "$ADMIN_LIST" ]]; then
     skip "Admin group membership could not be parsed" "Verify manually: dscl . -read /Groups/admin GroupMembership" "user.admin.count"
   else
@@ -2565,42 +2812,85 @@ section_22_persistence_tcc() {
     fi
   fi
 
-  # TCC permission holders — only when sudo is available; the database itself
-  # is also TCC-protected, so the running terminal needs Full Disk Access.
+  # TCC permission holders — only when sudo is available; the databases
+  # themselves are TCC-protected, so the running terminal may need Full Disk
+  # Access. Check BOTH user and system DBs; many sensitive approvals live in
+  # the per-user DB. A partial read is SKIP, never a clean PASS.
   if $QUICK; then
     skip "TCC permission holders (requires sudo)" "" "tcc.holders"
   else
-    TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-    if sudo -n test -r "$TCC_DB" 2>/dev/null; then
-      TCC_OUT=$(sudo -n sqlite3 -readonly "$TCC_DB" \
-        "SELECT service || '|' || client FROM access WHERE auth_value=2 ORDER BY service, client" \
-        2>/dev/null || true)
-      if [[ -n "$TCC_OUT" ]]; then
-        TCC_COUNT=$(echo "$TCC_OUT" | wc -l | tr -d ' ')
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+      skip "TCC permission holders unreadable — sqlite3 not found" "" "tcc.holders"
+    else
+      TCC_OUT=""
+      TCC_READABLE=0
+      TCC_UNREADABLE=0
+      TCC_UNREADABLE_LABELS=""
+      for tcc_spec in \
+        "user|$HOME/Library/Application Support/com.apple.TCC/TCC.db|false" \
+        "system|/Library/Application Support/com.apple.TCC/TCC.db|true"; do
+        tcc_scope="${tcc_spec%%|*}"
+        rest="${tcc_spec#*|}"
+        tcc_db="${rest%%|*}"
+        tcc_sudo="${rest##*|}"
+
+        if [[ "$tcc_sudo" == "true" ]]; then
+          if sudo -n test -e "$tcc_db" 2>/dev/null; then
+            tcc_exists=0
+          else
+            tcc_exists=1
+          fi
+        else
+          if [[ -e "$tcc_db" ]]; then
+            tcc_exists=0
+          else
+            tcc_exists=1
+          fi
+        fi
+        if [[ "$tcc_exists" -ne 0 ]]; then
+          TCC_UNREADABLE=$((TCC_UNREADABLE + 1))
+          TCC_UNREADABLE_LABELS="${TCC_UNREADABLE_LABELS}${tcc_scope} "
+          continue
+        fi
+
+        tcc_rc=0
+        tcc_rows=$(_tcc_query_approved "$tcc_db" "$tcc_sudo") || tcc_rc=$?
+        if [[ "$tcc_rc" -eq 0 ]]; then
+          TCC_READABLE=$((TCC_READABLE + 1))
+          while IFS= read -r tcc_row; do
+            [[ -n "$tcc_row" ]] && TCC_OUT="${TCC_OUT}${TCC_OUT:+
+}${tcc_scope}|${tcc_row}"
+          done <<<"$tcc_rows"
+        else
+          TCC_UNREADABLE=$((TCC_UNREADABLE + 1))
+          TCC_UNREADABLE_LABELS="${TCC_UNREADABLE_LABELS}${tcc_scope} "
+        fi
+      done
+
+      if [[ "$TCC_READABLE" -eq 0 ]]; then
+        skip "TCC databases not accessible (needs sudo + Full Disk Access for this terminal)" "Grant: System Settings → Privacy & Security → Full Disk Access → add your terminal" "tcc.holders"
+      else
+        TCC_COUNT=$( (printf '%s\n' "$TCC_OUT" | grep -c '.') || true)
+        TCC_COUNT=${TCC_COUNT:-0}
         DANGEROUS_HOLDERS=""
         for svc in kTCCServiceAccessibility kTCCServiceListenEvent kTCCServiceScreenCapture kTCCServiceSystemPolicyAllFiles; do
-          h=$(echo "$TCC_OUT" | awk -F'|' -v s="$svc" '$1 == s { print $2 }' | paste -sd, -)
+          h=$(printf '%s\n' "$TCC_OUT" | awk -F'|' -v s="$svc" '$2 == s { print $1 ":" $3 }' | paste -sd, -)
           [[ -n "$h" ]] && DANGEROUS_HOLDERS+="${svc#kTCCService} → ${h}; "
         done
         if [[ -n "$DANGEROUS_HOLDERS" ]]; then
           if [[ "$REDACT" == "true" ]]; then
-            # Sensitive holders include bundle IDs that identify installed
-            # apps. Under --redact, surface only the number of services with
-            # at least one dangerous grant, not the client list.
             SENSITIVE_SVC_COUNT=$( (printf '%s' "$DANGEROUS_HOLDERS" | tr ';' '\n' | grep -c '.') || true)
             SENSITIVE_SVC_COUNT=${SENSITIVE_SVC_COUNT:-0}
             skip "TCC: $TCC_COUNT permission grant(s); ${SENSITIVE_SVC_COUNT} sensitive service(s) have approved clients" "Verify: System Settings → Privacy & Security → Accessibility / Screen Recording / Full Disk Access / Input Monitoring." "tcc.holders"
           else
             skip "TCC: $TCC_COUNT permission grant(s). Sensitive: ${DANGEROUS_HOLDERS%; }" "Verify: System Settings → Privacy & Security → Accessibility / Screen Recording / Full Disk Access / Input Monitoring. Inspect any client you didn't approve." "tcc.holders"
           fi
+        elif [[ "$TCC_UNREADABLE" -gt 0 ]]; then
+          skip "TCC partial scan: $TCC_COUNT permission grant(s) in readable DB(s); unreadable scope(s): ${TCC_UNREADABLE_LABELS% }" "Grant Full Disk Access to this terminal and rerun before treating TCC as clean." "tcc.holders"
         else
           pass "$TCC_COUNT TCC grant(s); none in the most-sensitive list" "tcc.holders"
         fi
-      else
-        pass "TCC.db readable, no broad permission grants" "tcc.holders"
       fi
-    else
-      skip "TCC.db not accessible (needs sudo + Full Disk Access for this terminal)" "Grant: System Settings → Privacy & Security → Full Disk Access → add your terminal" "tcc.holders"
     fi
   fi
 }
@@ -2701,7 +2991,7 @@ section_23_device_mgmt_privacy() {
   done
   if [[ ${#CLIPBOARD_FOUND[@]} -gt 0 ]]; then
     if [[ "$REDACT" == "true" ]]; then
-      skip "${#CLIPBOARD_FOUND[@]} clipboard manager(s) detected" "Each retains paste history. Audit retention settings; never paste seed phrases, recovery codes, or 1Password vault items into apps with clipboard history enabled." "privacy.clipboard.manager"
+      skip "${#CLIPBOARD_FOUND[@]} clipboard manager(s) detected" "Each retains paste history. Audit retention settings; never paste seed phrases, recovery codes, or password-manager items into apps with clipboard history enabled." "privacy.clipboard.manager"
     else
       skip "Clipboard manager(s) detected: ${CLIPBOARD_FOUND[*]}" "Each retains paste history. Audit retention settings; never paste seed phrases, recovery codes, or 1Password vault items into apps with clipboard history enabled." "privacy.clipboard.manager"
     fi
@@ -2737,89 +3027,106 @@ run_all_sections() {
   section_23_device_mgmt_privacy
 }
 
+_diff_parse_rows() {
+  # _diff_parse_rows SOURCE_NAME
+  # Reads one mac-posture-audit JSON document from stdin and emits
+  # "id status" lines. This is deliberately small and schema-specific so
+  # --diff does not depend on python3/jq/node.
+  local source="$1" compact rows split_rows obj id status seen idx
+  compact=$(cat | tr '\n' ' ' | sed 's/[[:space:]]//g') || return 2
+  if [[ "$compact" != *'"results":['* ]]; then
+    printf -- '--diff: %s JSON must contain a results array\n' "$source" >&2
+    return 2
+  fi
+  rows=$(printf '%s' "$compact" | sed -E 's/^.*"results":\[(.*)\]\}.*$/\1/')
+  if [[ "$rows" == "$compact" ]]; then
+    printf -- '--diff: %s JSON must contain a results array\n' "$source" >&2
+    return 2
+  fi
+  [[ -z "$rows" ]] && return 0
+
+  split_rows=$(printf '%s' "$rows" | sed 's/},{/}\
+{/g')
+  seen=" "
+  idx=0
+  while IFS= read -r obj; do
+    [[ -z "$obj" ]] && continue
+    id=$(printf '%s' "$obj" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+    status=$(printf '%s' "$obj" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
+    if [[ -z "$id" ]]; then
+      printf -- '--diff: %s results[%d].id must be a non-empty string\n' "$source" "$idx" >&2
+      return 2
+    fi
+    case "$status" in
+    pass | warn | fail | skip) ;;
+    *)
+      printf -- '--diff: %s results[%d].status must be pass|warn|fail|skip\n' "$source" "$idx" >&2
+      return 2
+      ;;
+    esac
+    if [[ "$seen" == *" $id "* ]]; then
+      printf -- '--diff: %s has duplicate id: %s\n' "$source" "$id" >&2
+      return 2
+    fi
+    seen="$seen$id "
+    printf '%s %s\n' "$id" "$status"
+    idx=$((idx + 1))
+  done <<<"$split_rows"
+}
+
+_diff_lookup_status() {
+  local rows="$1" ident="$2" row rid status
+  while IFS= read -r row; do
+    [[ -z "$row" ]] && continue
+    rid="${row%% *}"
+    status="${row#* }"
+    if [[ "$rid" == "$ident" ]]; then
+      printf '%s' "$status"
+      return 0
+    fi
+  done <<<"$rows"
+  printf ''
+}
+
 emit_diff() {
   # Compare current run's JSON_ROWS against the JSON file at $DIFF_PATH.
   # Prints one line per change. Exits 0 on no changes, 1 on any change,
-  # 2 on parse error. The current rows are passed in via env so the heredoc
-  # can stay quoted (no bash interpolation inside the Python source).
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "--diff: python3 is required (run 'xcode-select --install')" >&2
-    exit 2
-  fi
-  local current_body
+  # 2 on parse error. Runtime stays stock-shell only (no python3/jq/node).
+  local current_body prev_pairs curr_pairs ids ident p c marker changes
   current_body=$(
     IFS=,
     echo "${JSON_ROWS[*]:-}"
   )
-  CURRENT_ROWS="[${current_body}]" python3 - "$DIFF_PATH" <<'PY'
-import json, os, sys
+  prev_pairs=$(_diff_parse_rows "previous" <"$DIFF_PATH") || exit 2
+  curr_pairs=$(printf '{"results":[%s]}' "$current_body" | _diff_parse_rows "current") || exit 2
 
-prev_path = sys.argv[1]
-try:
-    prev = json.load(open(prev_path))
-except Exception as e:
-    print(f"--diff: could not parse {prev_path}: {e}", file=sys.stderr)
-    sys.exit(2)
-try:
-    current_doc = json.loads(os.environ["CURRENT_ROWS"])
-except Exception as e:
-    print(f"--diff: internal: failed to parse current rows: {e}", file=sys.stderr)
-    sys.exit(2)
+  ids=$(printf '%s\n%s\n' "$prev_pairs" "$curr_pairs" | awk 'NF {print $1}' | sort -u)
+  changes=0
+  while IFS= read -r ident; do
+    [[ -z "$ident" ]] && continue
+    p=$(_diff_lookup_status "$prev_pairs" "$ident")
+    c=$(_diff_lookup_status "$curr_pairs" "$ident")
+    [[ "$p" == "$c" ]] && continue
+    changes=$((changes + 1))
+    if [[ -z "$p" ]]; then
+      printf '+ %s\t(new)        %s\n' "$ident" "$c"
+    elif [[ -z "$c" ]]; then
+      printf -- '- %s\t(removed)    was %s\n' "$ident" "$p"
+    else
+      marker="~"
+      case "$p->$c" in
+      pass-\>warn | pass-\>fail | warn-\>fail | skip-\>warn | skip-\>fail) marker="^" ;;
+      fail-\>warn | fail-\>pass | warn-\>pass | warn-\>skip | fail-\>skip) marker="v" ;;
+      esac
+      printf '%s %s\t%s -> %s\n' "$marker" "$ident" "$p" "$c"
+    fi
+  done <<<"$ids"
 
-def rows_by_id(doc, source):
-    if not isinstance(doc, dict):
-        print(f"--diff: {source} JSON must be an object", file=sys.stderr)
-        sys.exit(2)
-    rows = doc.get("results")
-    if not isinstance(rows, list):
-        print(f"--diff: {source} JSON must contain a results array", file=sys.stderr)
-        sys.exit(2)
-
-    out = {}
-    for i, row in enumerate(rows):
-        if not isinstance(row, dict):
-            print(f"--diff: {source} results[{i}] must be an object", file=sys.stderr)
-            sys.exit(2)
-        ident = row.get("id")
-        status = row.get("status")
-        if not isinstance(ident, str) or not ident:
-            print(f"--diff: {source} results[{i}].id must be a non-empty string", file=sys.stderr)
-            sys.exit(2)
-        if not isinstance(status, str):
-            print(f"--diff: {source} results[{i}].status must be a string", file=sys.stderr)
-            sys.exit(2)
-        if ident in out:
-            print(f"--diff: {source} has duplicate id: {ident}", file=sys.stderr)
-            sys.exit(2)
-        out[ident] = status
-    return out
-
-prev_by_id = rows_by_id(prev, "previous")
-curr_by_id = rows_by_id({"results": current_doc}, "current")
-
-up = {("pass", "warn"), ("pass", "fail"), ("warn", "fail"), ("skip", "warn"), ("skip", "fail")}
-down = {("fail", "warn"), ("fail", "pass"), ("warn", "pass"), ("warn", "skip"), ("fail", "skip")}
-
-changes = 0
-for ident in sorted(set(prev_by_id) | set(curr_by_id)):
-    p = prev_by_id.get(ident)
-    c = curr_by_id.get(ident)
-    if p == c:
-        continue
-    changes += 1
-    if p is None:
-        print(f"+ {ident}\t(new)        {c}")
-    elif c is None:
-        print(f"- {ident}\t(removed)    was {p}")
-    else:
-        marker = "^" if (p, c) in up else ("v" if (p, c) in down else "~")
-        print(f"{marker} {ident}\t{p} -> {c}")
-
-if changes == 0:
-    print("no posture changes")
-sys.exit(1 if changes > 0 else 0)
-PY
-  exit $?
+  if [[ "$changes" -eq 0 ]]; then
+    echo "no posture changes"
+    exit 0
+  fi
+  exit 1
 }
 
 emit_summary() {

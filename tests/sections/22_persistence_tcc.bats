@@ -40,6 +40,49 @@ mock_crontab_with_entries() {
   mock_cli_script crontab $'#!/usr/bin/env bash\nprintf "# header\\n0 9 * * * /usr/bin/foo\\n"\nexit 0'
 }
 
+mock_sudo_tcc_passthrough() {
+  mock_cli_script sudo '#!/usr/bin/env bash
+[[ "$1" == "-n" ]] && shift
+case "$1" in
+  test) exit 0 ;;
+  *) exec "$@" ;;
+esac'
+}
+
+mock_sqlite_tcc_modern() {
+  mock_cli_script sqlite3 '#!/usr/bin/env bash
+db="$2"
+sql="$3"
+case "$sql" in
+  "PRAGMA table_info(access);")
+    printf "0|service|TEXT|1||1\n1|client|TEXT|1||2\n2|auth_value|INTEGER|0||0\n"
+    ;;
+  *"auth_value=2"*)
+    if [[ "$db" == "/Library/Application Support/com.apple.TCC/TCC.db" ]]; then
+      printf "kTCCServiceAccessibility|com.example.SystemTool\n"
+    else
+      printf "kTCCServiceScreenCapture|com.example.UserTool\n"
+    fi
+    ;;
+esac'
+}
+
+mock_sqlite_tcc_user_only_clean() {
+  mock_cli_script sqlite3 '#!/usr/bin/env bash
+db="$2"
+sql="$3"
+case "$sql" in
+  "PRAGMA table_info(access);")
+    if [[ "$db" == "/Library/Application Support/com.apple.TCC/TCC.db" ]]; then
+      exit 1
+    else
+      printf "0|service|TEXT|1||1\n1|client|TEXT|1||2\n2|auth_value|INTEGER|0||0\n"
+    fi
+    ;;
+  *"auth_value=2"*) exit 0 ;;
+esac'
+}
+
 @test "empty user LaunchAgents directory passes" {
   mock_osascript_empty
   mock_crontab_empty
@@ -194,4 +237,31 @@ mock_crontab_with_entries() {
   QUICK=true
   section_22_persistence_tcc
   assert_recorded skip "TCC permission holders (requires sudo)"
+}
+
+@test "TCC reads both user and system databases" {
+  mkdir -p "$TEST_HOME/Library/Application Support/com.apple.TCC"
+  : >"$TEST_HOME/Library/Application Support/com.apple.TCC/TCC.db"
+  mock_osascript_empty
+  mock_crontab_empty
+  mock_sudo_tcc_passthrough
+  mock_sqlite_tcc_modern
+  QUICK=false
+  section_22_persistence_tcc
+  assert_recorded skip "TCC: 2 permission grant(s)"
+  [[ "${RESULTS_SKIP[*]}" == *"UserTool"* ]]
+  [[ "${RESULTS_SKIP[*]}" == *"SystemTool"* ]]
+}
+
+@test "TCC partial read is SKIP, not a clean PASS" {
+  mkdir -p "$TEST_HOME/Library/Application Support/com.apple.TCC"
+  : >"$TEST_HOME/Library/Application Support/com.apple.TCC/TCC.db"
+  mock_osascript_empty
+  mock_crontab_empty
+  mock_sudo_tcc_passthrough
+  mock_sqlite_tcc_user_only_clean
+  QUICK=false
+  section_22_persistence_tcc
+  assert_recorded skip "TCC partial scan"
+  [[ "${RESULTS_PASS[*]-}" != *"none in the most-sensitive list"* ]]
 }

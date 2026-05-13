@@ -26,6 +26,15 @@ esac"
 # on a privilege check. Fix: SKIP.
 mock_dscl_admin_empty() {
   mock_cli_script dscl $'#!/usr/bin/env bash\nexit 0'
+  mock_cli_script dscacheutil $'#!/usr/bin/env bash\nexit 0'
+}
+
+@test "admin parser falls back to dscacheutil when dscl omits membership" {
+  mock_dscl_admin_empty
+  mock_cli_script dscacheutil $'#!/usr/bin/env bash\nprintf "name: admin\\npassword: *\\ngid: 80\\nusers: alice bob\\n"'
+  QUICK=true
+  section_20_users_sudo
+  assert_recorded pass "2 admin users"
 }
 
 @test "empty admin GroupMembership emits SKIP, not a false PASS" {

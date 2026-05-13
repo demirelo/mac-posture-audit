@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# shellcheck disable=SC2034
 
 load '../helpers'
 
@@ -22,9 +23,7 @@ case "$key" in
 esac'
   export SSH_AUTH_SOCK="/var/run/com.apple.launchd/test/Listeners"
 
-  set +e
   section_11_ssh
-  set -e
 
   assert_recorded warn "Unencrypted SSH private key(s) on disk: id_ed25519"
   assert_recorded pass "SSH private key(s) appear passphrase-protected: id_rsa"
@@ -41,6 +40,35 @@ esac'
 
   assert_recorded pass "No private SSH keys in ~/.ssh/"
   assert_recorded skip "SSH_AUTH_SOCK is unset"
+}
+
+@test "SSH redaction suppresses private key basenames" {
+  load_script
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME/.ssh"
+  : >"$HOME/.ssh/id_ed25519"
+  : >"$HOME/.ssh/id_rsa"
+  mock_cli_script ssh-keygen '#!/usr/bin/env bash
+key=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-f" ]]; then key="$arg"; fi
+  prev="$arg"
+done
+case "$key" in
+  *id_ed25519) exit 0 ;;
+  *id_rsa) echo "incorrect passphrase supplied to decrypt private key" >&2; exit 255 ;;
+  *) exit 1 ;;
+esac'
+  export SSH_AUTH_SOCK="/var/run/com.apple.launchd/test/Listeners"
+
+  REDACT=true
+  section_11_ssh
+
+  assert_recorded warn "Unencrypted SSH private key(s) on disk: 1"
+  assert_recorded pass "SSH private key(s) appear passphrase-protected: 1"
+  [[ "${RESULTS_PASS[*]-} ${RESULTS_WARN[*]-} ${RESULTS_FAIL[*]-} ${RESULTS_SKIP[*]-}" != *"id_ed25519"* ]]
+  [[ "${RESULTS_PASS[*]-} ${RESULTS_WARN[*]-} ${RESULTS_FAIL[*]-} ${RESULTS_SKIP[*]-}" != *"id_rsa"* ]]
 }
 
 @test "section_11_ssh: nullglob state is not leaked to subsequent sections" {
