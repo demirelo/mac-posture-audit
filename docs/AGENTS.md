@@ -38,6 +38,8 @@ Pick the lens that fits the user before reading the rows. The same `warn` row ca
 
 **Web3 / wallet user.** All of "Developer" PLUS: wallet isolation, transaction simulators, hardware wallet, browser blast-radius separation, FIDO2 hardware key. Every `ext.wallet` row matters. Profile this user as `--profile web3` and surface escalations.
 
+**Solo founder shipping crypto-adjacent code.** Lives in both threat models simultaneously: writes / merges code (dependency confusion, malicious `postinstall`, unencrypted SSH keys, IDE workspace trust) AND custodies crypto (wallet exposure, remote-access apps, cloud-sync exfil of seed material). Profile as `--profile founder` — explicit union of `developer` and `web3` escalations.
+
 **Journalist / activist / dissident.** Threat model includes nation-state spyware. Lockdown Mode flips from "skip" to "should be ON." Bluetooth, AirDrop, MDM, telemetry, unfamiliar profiles all become concerns. Profile as `--profile paranoid`.
 
 **Shared / family Mac.** Multiple human users, mixed trust. Service accounts in admin group, sharing services, AirDrop mode all matter more.

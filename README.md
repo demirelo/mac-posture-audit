@@ -44,31 +44,35 @@ The tripwire is regression-tested by `tests/check-read-only/should_pass/*.sh` (a
 
 ## What it checks
 
-23 sections covering:
+25 sections covering 143 checks:
 
 - **System integrity** — SIP, Gatekeeper, FileVault, Apple Silicon Secure Boot, third-party kernel extensions
 - **Login & lock screen** — auto-login, screen lock delay, login window mode, Touch ID for sudo
 - **Privacy & telemetry** — Apple personalized ads, analytics sharing, Lockdown Mode (situational)
 - **Network — firewall & sharing** — App Firewall state, stealth mode, Remote Login, Sharing services, Internet Sharing
-- **Network — AirDrop & Bluetooth** — discoverability mode, Bluetooth on/off
-- **Network — DNS & outbound** — NextDNS profile detection, active resolvers, DoH profiles, VPN clients, outbound monitors (Little Snitch / LuLu)
+- **Network — AirDrop, Bluetooth & Wi-Fi** — discoverability mode, Bluetooth on/off, count of remembered Wi-Fi networks (passive triangulation surface)
+- **Network — DNS, VPN & outbound** — NextDNS profile detection, active resolvers, DoH profiles, VPN clients, VPN killswitch state (verified for Mullvad; advisory for ProtonVPN / NordVPN), outbound monitors (Little Snitch / LuLu)
 - **Network — filters & proxies** — HTTP/HTTPS/SOCKS proxies, PAC URLs, WPAD, configuration profiles, system extensions, `/etc/hosts` audit
 - **Antivirus & endpoint protection** — 16 AV/EDR engines detected, Objective-See tools, browser-side AV extensions
-- **Browsers** — installed browsers, default browser
+- **Browsers** — installed browsers, default browser, **bundle-mtime version currency** (Chromium / Firefox >28d stale warns), **profile count** across Chrome / Brave / Edge / Firefox
 - **Browser extensions** — Chromium (Brave/Chrome/Edge/Arc/Vivaldi), Safari (via `pluginkit`), Firefox (via `extensions.json`); detects protective (uBlock, 1Password, Privacy Badger), wallet (MetaMask, Phantom, Rabby), and transaction simulators (Wallet Guard, Pocket Universe)
 - **SSH** — plaintext private keys, 1Password agent socket, `SSH_AUTH_SOCK`, config file permissions
 - **Git signing** — commit signing config, allowedSignersFile, user.email
-- **Supply chain** — npm/yarn/pnpm `ignore-scripts`, Socket CLI, custom cooldown wrappers, `.npmrc` audit, `gh auth status`, git credential helper, global `git url.insteadOf` rewrites, `core.hooksPath`, `~/.cargo/credentials`, `~/.pypirc`, `~/.gem/credentials`, third-party Homebrew taps, `brew analytics`
+- **Supply chain** — npm/yarn/pnpm `ignore-scripts`, Socket CLI, custom cooldown wrappers, `.npmrc` audit, `gh auth status`, git credential helper, global `git url.insteadOf` rewrites, `core.hooksPath`, `~/.cargo/credentials`, `~/.pypirc`, `~/.gem/credentials`, third-party Homebrew taps, `brew analytics`, **direnv allow-list size**, **pip / uv / pixi `extra-index-url`** (dependency-confusion risk)
 - **Credential & secret hygiene** — 14+ credential patterns in shell rc files, project-style `.env` files at $HOME, sensitive dotfiles (`.aws`, `.netrc`, `.npmrc` token, `.docker`, `.kube`, embedded URLs in git config)
 - **Password manager & 2FA hardware** — 1Password / Bitwarden / Dashlane, YubiKey / Yubico Authenticator, Ledger as FIDO2 hint
 - **Crypto hardware wallet** — Ledger Live, Trezor Suite, Keystone, GridPlus
-- **Folder layout & sensitive data** — encrypted Vault sparsebundle, Downloads hygiene, sensitive folder names at `$HOME`
-- **Backups** — Time Machine destinations + recency, Backblaze, Carbon Copy Cloner, file-encryption tools
-- **iCloud** — sign-in detection, save-to-cloud default, iCloud Drive sync, ADP placeholder
+- **Folder layout & sensitive data** — encrypted Vault sparsebundle, Downloads hygiene, sensitive folder names at `$HOME`, **`.ssh` / `.aws` / `.kube` / wallet data / dotfiles in cloud-sync roots** (iCloud Drive, Dropbox, Google Drive, OneDrive, Box) with symlink resolution
+- **Backups** — Time Machine destinations + recency, **TM encryption state**, Backblaze, Carbon Copy Cloner, file-encryption tools
+- **iCloud** — sign-in detection, save-to-cloud default, iCloud Drive sync, ADP placeholder, **Desktop & Documents Folders sync detection**
 - **User accounts & sudo** — admin count, service accounts in admin group, NOPASSWD in sudoers
 - **Software updates & Find My Mac** — automatic update checks, Find My Mac multi-signal
-- **Persistence & TCC** — user/system LaunchAgents and LaunchDaemons, login items, crontab, TCC.db permission holders for Accessibility / Screen Recording / Full Disk Access / Input Monitoring (read-only `sqlite3 -readonly`; needs sudo + Full Disk Access on the running terminal)
-- **Device management & privacy awareness** — MDM enrollment status, screenshot save location (iCloud / Dropbox / Google Drive / OneDrive / Box leak detection), and clipboard-manager presence (Maccy / Paste / Raycast / Alfred / Pastebot / CopyClip / Pasta — every paste of a seed phrase, recovery code, or 1Password autofill ends up in their history)
+- **Persistence & TCC** — user/system LaunchAgents and LaunchDaemons, login items, crontab, TCC.db permission holders for Accessibility / Screen Recording / Full Disk Access / Input Monitoring (read-only `sqlite3 -readonly`; needs sudo + Full Disk Access on the running terminal), **remote-access apps** (AnyDesk / TeamViewer / Splashtop / RustDesk / Chrome Remote Desktop / VNC / Parsec), **sandbox runtime detection** (Docker / OrbStack / UTM), **gaming clients** (Steam / Discord / Epic / GOG / Battle.net)
+- **Device management & privacy awareness** — MDM enrollment status, screenshot save location (iCloud / Dropbox / Google Drive / OneDrive / Box leak detection), clipboard-manager presence (Maccy / Paste / Raycast / Alfred / Pastebot / CopyClip / Pasta)
+- **IDE workspace trust + wallet isolation** — VS Code and Cursor `security.workspace.trust.*` settings (defends against "open malicious repo → tasks.json autoruns"), plus a `users.crypto_isolation_indicator` cross-section composite that flags single-user-Mac + default-browser-is-wallet-browser combinations
+- **Messaging apps (advisory)** — Telegram Desktop presence triggers a settings-to-verify checklist (auto-download OFF, group-add restricted)
+
+Composite checks combine multiple rows into a single posture verdict where the meaning depends on the combination: `system.theft_resistance`, `backup.recovery_path`, `ssh.posture`, `supply.posture`, `network.dns.encrypted`, `users.crypto_isolation_indicator`, `twofa.fido_gap`, and `av.engine.conflict`. See [`docs/AGENTS.md`](docs/AGENTS.md) §3 for the full table and the additional agent-only patterns that an LLM reviewer can layer on top.
 
 ## Usage
 
@@ -97,7 +101,7 @@ Flags:
 | `--network` | Allow live external probes (e.g., NextDNS live-routing check). Default off. |
 | `--offline` | Explicit no-external-calls (already the default) |
 | `--redact` | Mask hostname, emails, admin usernames, resolver IPs, and `$HOME` paths in output. Use when sharing the report. |
-| `--profile NAME` | Severity calibration. One of `normal` (default), `web3`, `paranoid`, `developer`. See [Profiles](#profiles). |
+| `--profile NAME` | Severity calibration. One of `normal` (default), `web3`, `paranoid`, `developer`, `founder`. See [Profiles](#profiles). |
 | `--diff PATH` | Compare current run against a previously saved `--json` output. Prints one line per id whose status differs. Exits 0 if no diffs, 1 if any. |
 | `--version` | Show the script version and exit |
 | `--help` | Show usage and exit |
@@ -109,9 +113,10 @@ Flags:
 | Profile | Escalates |
 |---|---|
 | `normal` | nothing — defaults |
-| `web3` | wallet-on-main-user → `fail`; npm/yarn/pnpm `ignore-scripts=false` → `fail`; missing supply-chain scanner → `fail`; unencrypted SSH key → `fail`; missing transaction simulator → `fail` |
-| `paranoid` | everything in `web3`, plus Bluetooth-on, AirDrop-discoverable, firewall not in block-all / no stealth, stale Time Machine, missing auto-updates, plaintext Docker auth |
-| `developer` | npm/yarn/pnpm `ignore-scripts=false` → `fail`; missing supply-chain scanner → `fail`; shell-rc credential pattern → `fail` (already `fail` by default in normal) |
+| `web3` | wallet-on-main-user → `fail`; npm/yarn/pnpm `ignore-scripts=false` → `fail`; missing supply-chain scanner → `fail`; unencrypted SSH key → `fail`; missing transaction simulator → `fail`; wallet data inside cloud sync → `fail`; remote-access app present → `fail`; wallet-isolation indicators missing → `fail`; IDE workspace trust disabled → `fail`; browser bundle >28d stale → `fail`; VPN killswitch off → `fail` |
+| `paranoid` | everything in `web3`, plus Bluetooth-on, AirDrop-discoverable, firewall not in block-all / no stealth, stale or unencrypted Time Machine, missing auto-updates, plaintext Docker auth, pip / uv / pixi `extra-index-url` configured |
+| `developer` | npm/yarn/pnpm `ignore-scripts=false` → `fail`; missing supply-chain scanner → `fail`; pip / uv / pixi `extra-index-url` → `fail`; shell-rc credential pattern → `fail` (already `fail` by default in normal) |
+| `founder` | explicit union of `developer` + `web3` — for solo founders shipping their own code who also custody crypto |
 
 The full override matrix lives at `PROFILE_OVERRIDES` in [mac-posture-audit.sh](mac-posture-audit.sh) — each entry is `profile|id|from_status|to_status` and only triggers when the check actually emits `from_status`. A profile can never lower a `fail` to a `warn`.
 
@@ -248,18 +253,20 @@ The Bats suite sources `mac-posture-audit.sh` as a library and uses fixtures/moc
 
 ## Roadmap
 
-The first version is intentionally read-only and local-first. Likely next improvements:
+v1.0.0 is the public-release cutover. Possible directions from here:
 
-- **Expanded fixtures** for more macOS version drift and edge cases across login, firewall/sharing, AirDrop, users/sudo, browser extensions, and TCC.
-- **Evidence fields** in JSON rows, so consumers can show structured supporting detail without scraping labels.
+- **More macOS-version fixtures** for login, firewall/sharing, AirDrop, users/sudo, browser extensions, and TCC corner cases.
+- **Evidence fields** in JSON rows so consumers can show structured supporting detail without scraping labels.
 - **`--deep` mode** for a slower, opt-in scan across project directories with explicit excludes and redaction-safe output.
 - **Signed release artifacts** with published checksums for easier pre-run verification.
-- **Continuous snapshot mode** that stores JSON locally and alerts on newly introduced failures.
+- **Continuous snapshot mode** that stores JSON locally and alerts on newly-introduced failures.
 - **Separate remediation companion** only if it stays clearly outside this audit script and requires explicit confirmation for every mutation.
+- **Per-brand killswitch verification** for ProtonVPN / NordVPN (currently advisory-only).
+- **Messaging app coverage** for Signal, Discord, WhatsApp — same advisory shape as Telegram in Section 25.
 
 ## Contributing
 
-Pull requests welcome. Keep the bash 3.2 compatibility and read-only principle.
+Pull requests welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the four invariants: read-only probes, bash 3.2 compatibility, stable IDs, and hermetic tests via `*_ROOTS` overrides.
 
 ## License
 

@@ -47,6 +47,7 @@ ext.total.count
 ext.wallet
 findmy.enabled
 folder.downloads.stale
+gaming.client.installed
 folder.sensitive.names
 folder.vault.found
 git.email.set
@@ -85,6 +86,7 @@ network.systemextensions.active
 network.systemextensions.filters
 network.vpn.killswitch
 network.vpn.running
+network.wifi.known_networks
 persist.cron
 persist.login_items
 persist.user.launchagents
@@ -115,10 +117,13 @@ supply.git.insteadof
 supply.npm.ignorescripts
 supply.npmrc.alwaysauth
 supply.npmrc.cooldown
+supply.direnv.allow_list
 supply.npmrc.registry
+supply.pip.extra_index_url
 supply.pnpm.ignorescripts
 supply.pypirc.creds
 supply.scanner
+supply.uv.config
 supply.posture
 supply.yarn.ignorescripts
 system.filevault.on

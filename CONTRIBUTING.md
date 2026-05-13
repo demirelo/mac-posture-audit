@@ -43,7 +43,9 @@ CI runs all of the above on `macos-latest` plus the JSON smoke + schema validato
 3. Emit a single row with `pass`/`warn`/`fail`/`skip` carrying the ID. Use a short, declarative label that round-trips through `--redact`. Hint text should suggest a concrete next action.
 4. If the row embeds any `$variable`, branch on `$REDACT` (see Gotchas above).
 5. Add a bats test under `tests/sections/`. Mock any CLI the check calls with `mock_cli_script` from `tests/helpers.bash`. Assert the recorded status and label.
-6. If the check is meant to escalate under a profile, add an entry to `PROFILE_OVERRIDES` and cover it in `tests/integration/profile.bats`.
+   - **If the check reads from `/Applications`, `$HOME`, or a system plist, parameterise the path via an overridable env array** (`APP_ROOTS`, `IDE_APP_ROOTS`, `VPN_KILLSWITCH_ROOTS`, `WIFI_KNOWN_PLISTS`, `SANDBOX_CLI_BINS` are the established names). Default to the production path; tests override to a `$BATS_TEST_TMPDIR` sandbox. Otherwise the test's outcome depends on what the developer happens to have installed — flaky CI, flaky local runs, and worse, false confidence.
+   - **If the check is non-trivial, factor it into a `_check_<thing>` helper** that the section delegates to. Tests can then call the helper directly without having to mock the entire surrounding section. Examples in the codebase: `_check_vpn_killswitch`, `_check_supply_direnv`, `_check_supply_pip_extra_index`, `_check_supply_uv_config`, `_check_wifi_known_networks`.
+6. If the check is meant to escalate under a profile, add an entry to `PROFILE_OVERRIDES` and cover it in `tests/integration/profile.bats`. The `founder` profile is an explicit union of `developer` + `web3` (kept verbatim in the override table rather than computed), so any new entry that lands in `developer` OR `web3` should also land in `founder`.
 
 ## PRs
 

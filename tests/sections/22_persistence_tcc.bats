@@ -380,3 +380,56 @@ setup_app_roots_sandbox() {
   assert_recorded skip "Docker"
   [[ "${RESULTS_SKIP[*]}" == *"UTM"* ]]
 }
+
+# ─── gaming.client.installed ──────────────────────────────────────────────
+
+@test "no gaming clients installed — passes" {
+  setup_app_roots_sandbox
+  SANDBOX_CLI_BINS=()
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded pass "No gaming clients installed"
+}
+
+@test "Discord installed — skip-with-advisory" {
+  setup_app_roots_sandbox
+  SANDBOX_CLI_BINS=()
+  mkdir -p "$TEST_APPS/Discord.app"
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded skip "Gaming client(s) installed: Discord"
+  # Hint text isn't in RESULTS_SKIP (label-only); check the JSON row instead
+  gaming_row=$(printf '%s\n' "${JSON_ROWS[@]}" | grep '"gaming.client.installed"')
+  [[ -n "$gaming_row" ]]
+  [[ "$gaming_row" == *"crypto-phishing channel"* ]]
+}
+
+@test "Steam + Discord installed — both listed" {
+  setup_app_roots_sandbox
+  SANDBOX_CLI_BINS=()
+  mkdir -p "$TEST_APPS/Steam.app"
+  mkdir -p "$TEST_APPS/Discord.app"
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded skip "Steam"
+  [[ "${RESULTS_SKIP[*]}" == *"Discord"* ]]
+}
+
+@test "gaming client names redacted under --redact" {
+  setup_app_roots_sandbox
+  SANDBOX_CLI_BINS=()
+  mkdir -p "$TEST_APPS/Steam.app"
+  REDACT=true
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  [[ "${RESULTS_SKIP[*]}" != *"Steam"* ]]
+  assert_recorded skip "1 gaming client(s) installed"
+}

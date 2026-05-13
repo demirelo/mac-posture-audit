@@ -30,7 +30,7 @@
 # shellcheck disable=SC2088
 set -uo pipefail
 
-SCRIPT_VERSION="0.4.0"
+SCRIPT_VERSION="1.0.0"
 
 # ── State ───────────────────────────────────────────────────────────────────
 PASS_N=0
@@ -48,16 +48,16 @@ parse_args() {
   QUICK=false      # --quick: skip sudo-required checks
   NETWORK=false    # --network: allow external probes (default off)
   REDACT=false     # --redact: mask host/email/usernames/IPs/paths in output
-  PROFILE="normal" # --profile: severity calibration (normal|web3|paranoid|developer)
+  PROFILE="normal" # --profile: severity calibration (normal|web3|paranoid|developer|founder)
   DIFF_PATH=""     # --diff: compare current run against previous JSON
   expect_profile=false
   expect_diff=false
   for arg in "$@"; do
     if $expect_profile; then
       case "$arg" in
-      normal | web3 | paranoid | developer) PROFILE="$arg" ;;
+      normal | web3 | paranoid | developer | founder) PROFILE="$arg" ;;
       *)
-        echo "unknown profile: $arg (one of: normal, web3, paranoid, developer)"
+        echo "unknown profile: $arg (one of: normal, web3, paranoid, developer, founder)"
         exit 2
         ;;
       esac
@@ -83,9 +83,9 @@ parse_args() {
     --profile=*)
       arg="${arg#--profile=}"
       case "$arg" in
-      normal | web3 | paranoid | developer) PROFILE="$arg" ;;
+      normal | web3 | paranoid | developer | founder) PROFILE="$arg" ;;
       *)
-        echo "unknown profile: $arg (one of: normal, web3, paranoid, developer)"
+        echo "unknown profile: $arg (one of: normal, web3, paranoid, developer, founder)"
         exit 2
         ;;
       esac
@@ -114,9 +114,12 @@ Flags (combinable):
   --redact          Mask hostname, email addresses, admin usernames, resolver IPs,
                     and $HOME paths in output. Use this when sharing the report.
   --profile NAME    Severity profile. One of: normal (default), web3, paranoid,
-                    developer. Escalates specific checks based on threat model
-                    (e.g. wallet-on-main-user is warn under normal, fail under
-                    web3 / paranoid).
+                    developer, founder. Escalates specific checks based on
+                    threat model (e.g. wallet-on-main-user is warn under
+                    normal, fail under web3 / paranoid). The 'founder'
+                    profile is the union of developer + web3 escalations
+                    for solo founders shipping their own code who also
+                    custody crypto.
   --diff PATH       Compare current run against a previously saved
                     --json output. Prints one line per id whose status
                     differs. Implies --json (run is collected internally).
@@ -132,7 +135,7 @@ USAGE
     esac
   done
   if $expect_profile; then
-    echo "--profile requires a value (one of: normal, web3, paranoid, developer)"
+    echo "--profile requires a value (one of: normal, web3, paranoid, developer, founder)"
     exit 2
   fi
   if $expect_diff; then
@@ -238,6 +241,8 @@ PROFILE_OVERRIDES=(
   "paranoid|network.vpn.killswitch|warn|fail"
   "paranoid|update.auto|warn|fail"
   "paranoid|cred.docker.auth|warn|fail"
+  "paranoid|supply.pip.extra_index_url|warn|fail"
+  "paranoid|supply.uv.config|warn|fail"
   # developer — supply chain matters; wallet-warn keeps default semantic.
   # cred.shellrc.patterns is intentionally absent: it already emits as `fail`
   # for every profile (the patterns are high-confidence prefixed tokens —
@@ -247,6 +252,29 @@ PROFILE_OVERRIDES=(
   "developer|supply.yarn.ignorescripts|warn|fail"
   "developer|supply.pnpm.ignorescripts|warn|fail"
   "developer|supply.scanner|warn|fail"
+  "developer|supply.pip.extra_index_url|warn|fail"
+  "developer|supply.uv.config|warn|fail"
+  # founder — union of developer + web3. Solo founders who ship their own
+  # code AND custody crypto have both attack surfaces. The list mirrors
+  # the developer and web3 entries above; if either of those changes,
+  # update here too. Keeping the entries explicit (rather than computed)
+  # keeps the override table greppable and the bash 3.2 lookup simple.
+  "founder|ext.wallet|warn|fail"
+  "founder|supply.npm.ignorescripts|warn|fail"
+  "founder|supply.yarn.ignorescripts|warn|fail"
+  "founder|supply.pnpm.ignorescripts|warn|fail"
+  "founder|supply.scanner|warn|fail"
+  "founder|supply.pip.extra_index_url|warn|fail"
+  "founder|supply.uv.config|warn|fail"
+  "founder|ssh.keys.unencrypted|warn|fail"
+  "founder|ext.simulator.advice|warn|fail"
+  "founder|data.crypto.cloud_sync_exposure|warn|fail"
+  "founder|apps.remote_access.present|warn|fail"
+  "founder|users.crypto_isolation_indicator|warn|fail"
+  "founder|ide.vscode.workspace_trust|warn|fail"
+  "founder|ide.cursor.workspace_trust|warn|fail"
+  "founder|browser.version_currency|warn|fail"
+  "founder|network.vpn.killswitch|warn|fail"
 )
 
 # Apply the profile severity table to a (status, id) pair. Returns the
@@ -872,6 +900,67 @@ section_05_airdrop_bluetooth() {
   *) skip "Bluetooth state could not be parsed" "" "network.bluetooth.off" ;;
   esac
 
+  _check_wifi_known_networks
+}
+
+_check_wifi_known_networks() {
+  # network.wifi.known_networks — count remembered SSIDs. macOS remembers
+  # every Wi-Fi network the device has joined and probes them when
+  # scanning, which is a triangulation surface (a passive attacker can
+  # correlate the SSID list to known coffee shops, conference networks,
+  # the user's home / office). On Big Sur and later the list lives in
+  # /Library/Preferences/com.apple.wifi.known-networks.plist; older
+  # macOS used .../SystemConfiguration/com.apple.airport.preferences.
+  # The file is owned by root and not always world-readable, so we may
+  # need sudo. We try unprivileged first to avoid asking when not
+  # necessary.
+  #
+  # WIFI_KNOWN_PLISTS is overridable so the test suite can point at a
+  # fixture.
+  if [[ -z "${WIFI_KNOWN_PLISTS+set}" ]]; then
+    WIFI_KNOWN_PLISTS=(
+      "/Library/Preferences/com.apple.wifi.known-networks.plist"
+      "/Library/Preferences/SystemConfiguration/com.apple.airport.preferences.plist"
+    )
+  fi
+  local plist found_plist="" dump=""
+  for plist in "${WIFI_KNOWN_PLISTS[@]}"; do
+    if [[ -f "$plist" ]]; then
+      found_plist="$plist"
+      # Try unprivileged read first.
+      dump=$(plutil -p "$plist" 2>/dev/null || echo "")
+      if [[ -z "$dump" ]] && ! $QUICK; then
+        # Permission denied — try sudo -n (non-interactive). If sudo also
+        # fails, fall through to the skip-with-advisory.
+        dump=$(sudo -n plutil -p "$plist" 2>/dev/null || echo "")
+      fi
+      break
+    fi
+  done
+  if [[ -z "$found_plist" ]]; then
+    skip "Wi-Fi known networks plist not found" "" "network.wifi.known_networks"
+    return
+  fi
+  if [[ -z "$dump" ]]; then
+    skip "Wi-Fi known networks plist not readable (try with sudo)" "Rerun with sudo to enumerate. The list is at $found_plist and grows with every joined network." "network.wifi.known_networks"
+    return
+  fi
+  # SSIDs appear as either SSIDString (older format) or as top-level keys
+  # in known-networks.plist (newer). Count either signal; whichever is
+  # present in this plist version.
+  # grep -c exits 1 when there are zero matches but still prints "0", so
+  # any `|| echo 0` fallback produces a two-line result that breaks the
+  # subsequent [[ -eq 0 ]] comparison. Swallow the exit with `|| true`.
+  local ssid_count
+  ssid_count=$(printf '%s' "$dump" | grep -cE '"SSIDString" =>|"SSID_STR" =>|"wifi.network.ssid.[^"]+"|"network_ssid" =>' 2>/dev/null || true)
+  ssid_count=${ssid_count:-0}
+  if [[ "$ssid_count" -eq 0 ]]; then
+    skip "Wi-Fi known networks: count not parsable from this plist format" "Plist found but SSID extraction yielded zero matches. Format may have changed; consider opening an issue with 'plutil -p $found_plist | head' (redact sensitive SSIDs)." "network.wifi.known_networks"
+  elif [[ "$ssid_count" -le 30 ]]; then
+    pass "Wi-Fi known networks: $ssid_count (within reasonable history)" "network.wifi.known_networks"
+  else
+    warn "Wi-Fi known networks: $ssid_count remembered — consider pruning" "Each remembered SSID is probed when scanning, which can be used to triangulate where you've been. Prune via System Settings → Wi-Fi → 'Advanced…' → remove networks you no longer trust or use." "network.wifi.known_networks"
+  fi
 }
 
 _check_vpn_killswitch() {
@@ -1531,7 +1620,7 @@ section_09_browsers() {
   STALE_BROWSERS=()
   FRESH_COUNT=0
   NOW=$(date +%s)
-  STALE_THRESHOLD=$(( 28 * 86400 ))
+  STALE_THRESHOLD=$((28 * 86400))
   for row in "${BROWSER_BUNDLES[@]}"; do
     brand="${row%%|*}"
     bundle_name="${row##*|}"
@@ -1545,16 +1634,16 @@ section_09_browsers() {
     [[ -n "$bundle" ]] || continue
     mtime=$(stat -f %m "$bundle" 2>/dev/null || echo "")
     [[ -n "$mtime" ]] || continue
-    age=$(( NOW - mtime ))
-    age_days=$(( age / 86400 ))
-    if (( age > STALE_THRESHOLD )); then
+    age=$((NOW - mtime))
+    age_days=$((age / 86400))
+    if ((age > STALE_THRESHOLD)); then
       STALE_BROWSERS+=("${brand} (${age_days}d)")
     else
-      FRESH_COUNT=$(( FRESH_COUNT + 1 ))
+      FRESH_COUNT=$((FRESH_COUNT + 1))
     fi
   done
   if [[ ${#STALE_BROWSERS[@]} -eq 0 ]]; then
-    if (( FRESH_COUNT == 0 )); then
+    if ((FRESH_COUNT == 0)); then
       skip "No non-Safari browser installed — version currency check N/A" "" "browser.version_currency"
     else
       pass "All installed non-Safari browsers updated within 28 days (${FRESH_COUNT} checked)" "browser.version_currency"
@@ -1594,13 +1683,13 @@ section_09_browsers() {
     [[ -d "$root" ]] || continue
     count=0
     if [[ -f "$root/Default/Preferences" ]]; then
-      count=$(( count + 1 ))
+      count=$((count + 1))
     fi
     while IFS= read -r p; do
-      [[ -n "$p" ]] && count=$(( count + 1 ))
+      [[ -n "$p" ]] && count=$((count + 1))
     done < <(find "$root" -maxdepth 1 -type d -name 'Profile *' 2>/dev/null)
-    if (( count > 0 )); then
-      PROFILE_COUNT_TOTAL=$(( PROFILE_COUNT_TOTAL + count ))
+    if ((count > 0)); then
+      PROFILE_COUNT_TOTAL=$((PROFILE_COUNT_TOTAL + count))
       PROFILE_COUNT_BREAKDOWN+=("${brand}:${count}")
     fi
   done
@@ -1609,16 +1698,16 @@ section_09_browsers() {
   if [[ -d "$FIREFOX_PROFILES_DIR" ]]; then
     ff_count=0
     while IFS= read -r p; do
-      [[ -n "$p" ]] && ff_count=$(( ff_count + 1 ))
+      [[ -n "$p" ]] && ff_count=$((ff_count + 1))
     done < <(find "$FIREFOX_PROFILES_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null)
-    if (( ff_count > 0 )); then
-      PROFILE_COUNT_TOTAL=$(( PROFILE_COUNT_TOTAL + ff_count ))
+    if ((ff_count > 0)); then
+      PROFILE_COUNT_TOTAL=$((PROFILE_COUNT_TOTAL + ff_count))
       PROFILE_COUNT_BREAKDOWN+=("Firefox:${ff_count}")
     fi
   fi
-  if (( PROFILE_COUNT_TOTAL == 0 )); then
+  if ((PROFILE_COUNT_TOTAL == 0)); then
     skip "Browser profiles: none enumerable (no Chromium / Firefox data dirs found)" "" "browser.profile_count"
-  elif (( PROFILE_COUNT_TOTAL == 1 )); then
+  elif ((PROFILE_COUNT_TOTAL == 1)); then
     if [[ "$REDACT" == "true" ]]; then
       skip "Single browser profile in use" "Consider creating a second profile to separate wallet / sensitive logins from everyday browsing. Same browser binary, separate cookie jar, separate extension set." "browser.profile_count"
     else
@@ -2022,6 +2111,100 @@ section_12_git_signing() {
 
 }
 
+_check_supply_direnv() {
+  # direnv stores per-path approvals as one file each under
+  # ~/.local/share/direnv/allow/. Each approved .envrc executes its
+  # contents in the user's shell when the user `cd`s into the matching
+  # directory. Long-stale allow lists accumulate cruft and widen the
+  # attack surface: a stale allow for an old repo that's since been
+  # compromised auto-executes on entry. Count entries and emit
+  # advisory thresholds.
+  local DIRENV_ALLOW_DIR="$HOME/.local/share/direnv/allow"
+  if [[ ! -d "$DIRENV_ALLOW_DIR" ]]; then
+    skip "direnv not in use (no allow list directory)" "" "supply.direnv.allow_list"
+    return
+  fi
+  local DIRENV_ALLOW_COUNT
+  DIRENV_ALLOW_COUNT=$(find "$DIRENV_ALLOW_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+  DIRENV_ALLOW_COUNT=${DIRENV_ALLOW_COUNT:-0}
+  if [[ "$DIRENV_ALLOW_COUNT" -eq 0 ]]; then
+    pass "direnv allow list is empty" "supply.direnv.allow_list"
+  elif [[ "$DIRENV_ALLOW_COUNT" -le 20 ]]; then
+    skip "${DIRENV_ALLOW_COUNT} direnv-approved .envrc path(s)" "Each entry is a directory whose .envrc auto-executes in your shell when you cd into it. Periodically: 'direnv prune' (removes orphaned entries), then review the rest." "supply.direnv.allow_list"
+  else
+    warn "${DIRENV_ALLOW_COUNT} direnv-approved .envrc path(s) — review for stale entries" "Each entry is a directory whose .envrc auto-executes in your shell. Run 'direnv prune' to remove orphaned entries (referenced repos no longer on disk), then review the rest manually: ls -lt $DIRENV_ALLOW_DIR | head" "supply.direnv.allow_list"
+  fi
+}
+
+_check_supply_pip_extra_index() {
+  # When pip is configured with extra-index-url, it pulls from a
+  # secondary index in addition to PyPI. If a private package name
+  # collides with a public PyPI package, the public one wins by default
+  # — the classic "dependency confusion" attack pattern. Surface any
+  # configured extra-index-url so the user can review.
+  local PIP_CONFIG_PATHS=(
+    "$HOME/.pip/pip.conf"
+    "$HOME/.config/pip/pip.conf"
+    "$HOME/Library/Application Support/pip/pip.conf"
+    "/etc/pip.conf"
+  )
+  local PIP_EXTRA_INDEX_HITS=() cfg any_config_found=false
+  for cfg in "${PIP_CONFIG_PATHS[@]}"; do
+    if [[ -f "$cfg" ]]; then
+      any_config_found=true
+      if grep -qE '^[[:space:]]*extra-index-url[[:space:]]*=' "$cfg" 2>/dev/null; then
+        PIP_EXTRA_INDEX_HITS+=("$cfg")
+      fi
+    fi
+  done
+  if [[ ${#PIP_EXTRA_INDEX_HITS[@]} -eq 0 ]]; then
+    if [[ "$any_config_found" == "true" ]]; then
+      pass "No pip extra-index-url configured" "supply.pip.extra_index_url"
+    else
+      skip "No pip config detected" "" "supply.pip.extra_index_url"
+    fi
+    return
+  fi
+  if [[ "$REDACT" == "true" ]]; then
+    warn "pip extra-index-url configured in ${#PIP_EXTRA_INDEX_HITS[@]} location(s)" "Each extra index is a parallel source for package resolution. If a private name collides with a public PyPI package, the public one wins by default — the dependency-confusion pattern. Audit the URL(s) and consider 'index-url' (replace) instead of 'extra-index-url' (add)." "supply.pip.extra_index_url"
+  else
+    warn "pip extra-index-url configured in: ${PIP_EXTRA_INDEX_HITS[*]}" "Each extra index is a parallel source for package resolution. If a private name collides with a public PyPI package, the public one wins by default — the dependency-confusion pattern. Audit the URL(s) and consider 'index-url' (replace) instead of 'extra-index-url' (add)." "supply.pip.extra_index_url"
+  fi
+}
+
+_check_supply_uv_config() {
+  # uv (Astral's Python package manager) and pixi (prefix.dev's polyglot
+  # package manager) inherit the same dependency-confusion risk pattern
+  # from pip. We grep for extra-index-url variants and surface
+  # advisorially since the keys are still stabilising across versions.
+  local UV_CONFIG_PATHS=(
+    "$HOME/.config/uv/uv.toml"
+    "$HOME/.config/pixi/config.toml"
+  )
+  local UV_HITS=() cfg any_config_found=false
+  for cfg in "${UV_CONFIG_PATHS[@]}"; do
+    if [[ -f "$cfg" ]]; then
+      any_config_found=true
+      if grep -qE '^[[:space:]]*(extra-index-url|extra_index_url|extra-index-urls|extra_index_urls)[[:space:]]*=' "$cfg" 2>/dev/null; then
+        UV_HITS+=("$cfg")
+      fi
+    fi
+  done
+  if [[ ${#UV_HITS[@]} -eq 0 ]]; then
+    if [[ "$any_config_found" == "true" ]]; then
+      pass "No uv / pixi extra-index-url configured" "supply.uv.config"
+    else
+      skip "uv / pixi not configured" "" "supply.uv.config"
+    fi
+    return
+  fi
+  if [[ "$REDACT" == "true" ]]; then
+    warn "uv / pixi extra-index-url configured in ${#UV_HITS[@]} location(s)" "Same dependency-confusion risk as pip extra-index-url — a private package name colliding with a public one falls back to the public registry. Audit each extra index." "supply.uv.config"
+  else
+    warn "uv / pixi extra-index-url configured in: ${UV_HITS[*]}" "Same dependency-confusion risk as pip extra-index-url — a private package name colliding with a public one falls back to the public registry. Audit each extra index." "supply.uv.config"
+  fi
+}
+
 section_13_supply_chain() {
   # ═════════════════════════════════════════════════════════════════════════════
   # 13 · Supply Chain (npm / yarn / pnpm)
@@ -2251,6 +2434,10 @@ section_13_supply_chain() {
       skip "Homebrew analytics enabled" "Optional: brew analytics off (sends anonymized usage to Homebrew)." "supply.brew.analytics"
     fi
   fi
+
+  _check_supply_direnv
+  _check_supply_pip_extra_index
+  _check_supply_uv_config
 
   # Composite: package-manager supply-chain posture.
   # The biggest single class of supply-chain attack against macOS devs is
@@ -3351,6 +3538,45 @@ section_22_persistence_tcc() {
     fi
   else
     skip "No sandbox runtime installed (Docker / OrbStack / UTM)" "Consider installing OrbStack (lightweight Docker alternative) or UTM (full VM) for testing untrusted packages without polluting the host." "sandbox.runtime.present"
+  fi
+
+  # gaming.client.installed — informational. Gaming clients aren't bad
+  # on their own, but each one carries side effects worth surfacing on
+  # a wallet-holding Mac:
+  #   - Steam asks for Accessibility for its overlay → keystroke/UI
+  #     introspection while Steam runs.
+  #   - Discord is the dominant crypto-phishing channel: fake admin
+  #     DMs, "verify your wallet" links, malicious bot invites.
+  #     Account-takeover is also high-value because attackers can
+  #     pivot to your contacts.
+  #   - Epic / GOG / Battle.net are stored credentials + game-account
+  #     value.
+  # We don't penalise presence — just skip-with-advisory. The user can
+  # decide whether the trade-off is worth it for their use.
+  GAMING_CLIENTS=(
+    "Steam.app"
+    "Discord.app"
+    "Epic Games Launcher.app"
+    "GOG Galaxy.app"
+    "Battle.net.app"
+  )
+  GAMING_FOUND=()
+  for app in "${GAMING_CLIENTS[@]}"; do
+    for root in "${APP_ROOTS[@]}"; do
+      if [[ -d "$root/$app" ]]; then
+        GAMING_FOUND+=("${app%.app}")
+        break
+      fi
+    done
+  done
+  if [[ ${#GAMING_FOUND[@]} -eq 0 ]]; then
+    pass "No gaming clients installed" "gaming.client.installed"
+  else
+    if [[ "$REDACT" == "true" ]]; then
+      skip "${#GAMING_FOUND[@]} gaming client(s) installed" "Each gaming client is an attack surface worth reviewing on a wallet-holding Mac. Steam asks for Accessibility (UI introspection); Discord is the dominant crypto-phishing channel; the rest are stored-credential surfaces. Log out when unused; review TCC grants (System Settings → Privacy & Security → Accessibility / Screen Recording / Input Monitoring)." "gaming.client.installed"
+    else
+      skip "Gaming client(s) installed: ${GAMING_FOUND[*]}" "Each gaming client is an attack surface worth reviewing on a wallet-holding Mac. Steam asks for Accessibility (UI introspection); Discord is the dominant crypto-phishing channel (fake admin DMs, 'verify your wallet' links); the rest are stored-credential surfaces. Log out when unused; review TCC grants (System Settings → Privacy & Security → Accessibility / Screen Recording / Input Monitoring)." "gaming.client.installed"
+    fi
   fi
 }
 

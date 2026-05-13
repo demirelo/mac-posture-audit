@@ -76,8 +76,14 @@ make_browser_aged() {
 
   section_09_browsers
 
-  assert_recorded warn "Firefox"
-  [[ "${RESULTS_WARN[*]}" != *"Brave"* ]]
+  # The browser.installed row (which uses hardcoded /Applications paths,
+  # not APP_ROOTS) can independently mention "Brave" when the developer
+  # running the suite has Brave installed. Pin the assertion to the
+  # specific version_currency JSON row.
+  ver_row=$(printf '%s\n' "${JSON_ROWS[@]}" | grep '"browser.version_currency"')
+  [[ -n "$ver_row" ]]
+  [[ "$ver_row" == *"Firefox"* ]]
+  [[ "$ver_row" != *"Brave"* ]]
 }
 
 @test "multiple stale browsers — all listed" {

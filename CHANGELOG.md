@@ -2,6 +2,57 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0] - 2026-05-13
+
+First public release. The audit has been used in iteration on a real macOS Tahoe machine since v0.1.0 (initial release, 2026-05-10); v1.0.0 collapses the v0.5.0 milestone into the public cut. From this version forward, IDs and the JSON schema are a stability contract — see `docs/schema.md` for the versioning policy.
+
+### Added
+
+- **`gaming.client.installed`** (Section 22) — informational scan of `/Applications` and `~/Applications` for Steam, Discord, Epic Games Launcher, GOG Galaxy, and Battle.net. None of these are bad on their own, but each carries side effects worth surfacing on a wallet-holding Mac: Steam asks for Accessibility for the in-game overlay (UI introspection); Discord is the dominant crypto-phishing channel (fake admin DMs, "verify your wallet" links, malicious bot invites); the others are stored-credential / account-takeover surfaces. Emits `pass` if none found, `skip` with an advisory if any are found. No profile escalation — the audit doesn't penalise legitimate use.
+- **`network.wifi.known_networks`** (Section 5, factored into `_check_wifi_known_networks` helper) — counts remembered SSIDs. macOS probes every remembered network when scanning, which is a passive triangulation surface (correlating SSID lists to known coffee shops, conference networks, the user's home / office). Reads `/Library/Preferences/com.apple.wifi.known-networks.plist` (Big Sur+) with `plutil -p`, falling back to the older `SystemConfiguration/com.apple.airport.preferences.plist`. Tries unprivileged first; if that fails and not in `--quick`, retries with `sudo -n` (no-prompt). If neither read works, skip-with-advisory pointing at the plist path. Thresholds: 0 (parse failure → skip), 1-30 (pass), 31+ (warn with a nudge to prune). `WIFI_KNOWN_PLISTS` env override for tests.
+
+- **`supply.direnv.allow_list`** (Section 13, factored into `_check_supply_direnv` helper) — counts entries in `~/.local/share/direnv/allow/`. Each file there is an approved `.envrc` path whose contents auto-execute in the user's shell on `cd`. Long-stale allow lists accumulate cruft and widen the attack surface: a stale approval for an old repo that has since been compromised auto-executes on entry. Emits `pass` if the directory exists but is empty, `skip` informational under 20 approvals, `warn` if ≥21 (with a nudge to run `direnv prune` and review the rest), `skip` "not in use" if the directory doesn't exist at all.
+- **`supply.pip.extra_index_url`** (Section 13, `_check_supply_pip_extra_index` helper) — greps user, system, and site pip configs (`~/.pip/pip.conf`, `~/.config/pip/pip.conf`, `~/Library/Application Support/pip/pip.conf`, `/etc/pip.conf`) for `extra-index-url = ...` lines. When configured, pip pulls from a secondary index in addition to PyPI; if a private package name collides with a public PyPI package, the public one wins by default — the classic dependency-confusion attack pattern. Emits `pass` if a config exists without the key, `warn` (escalated to `fail` under `developer` / `paranoid` / `founder`) if the key is set, `skip` if no config exists. Paths are redacted to a count under `--redact`.
+- **`supply.uv.config`** (Section 13, `_check_supply_uv_config` helper) — extends the same dependency-confusion pattern to uv (`~/.config/uv/uv.toml`) and pixi (`~/.config/pixi/config.toml`). Greps for all four spelling variants of the extra-index-url key (kebab/snake × singular/plural) since the schema is still stabilising across uv/pixi versions. Same severity / escalation / redaction shape as the pip check.
+
+### Profile system
+
+- **New `--profile founder`** preset — explicit union of `developer` + `web3` escalations, intended for solo founders shipping their own code who also custody crypto. The entries are listed verbatim rather than computed so the override table stays greppable and the bash 3.2 linear-lookup stays simple. If a future `developer` or `web3` entry is added, the `founder` block needs the same entry. CI doesn't enforce this yet — track if it becomes a problem.
+- All four supply chain v0.5 escalations land in `developer`, `paranoid`, and `founder` (web3 doesn't pick up the pip/uv ones since they're not crypto-specific): `developer | supply.pip.extra_index_url | warn → fail`, `developer | supply.uv.config | warn → fail`, plus matching `paranoid` and `founder` entries.
+
+### Refactor
+
+- The three new supply chain checks are factored out of `section_13_supply_chain` into standalone helpers (`_check_supply_direnv`, `_check_supply_pip_extra_index`, `_check_supply_uv_config`) so they can be unit-tested without having to mock out npm / yarn / pnpm / brew / gh just to verify a HOME-relative file probe. Same pattern as the `_check_vpn_killswitch` helper in v0.4.0. Production call sites unchanged.
+
+### Tests
+
+- New `tests/sections/13_supply_extras.bats` — 16 cases covering all three new helpers. direnv: absent (skip "not in use"), empty (pass), 3 entries (skip informational), 25 entries (warn to prune). pip: no config (skip), config without key (pass), config with key (warn), paranoid + developer + founder escalations (fail), `--redact` path suppression. uv/pixi: no config (skip), uv config without key (pass), uv kebab-case key (warn), pixi snake_case plural (warn), founder escalation (fail).
+
+### Test-only overrides
+
+- (None new — all three helpers read from `$HOME`, which the tests isolate with `isolate_home`.)
+
+### Formatting
+
+- Apply shfmt-style arithmetic formatting throughout `mac-posture-audit.sh` (no inner whitespace inside `$(())` or `(())`). The v0.4.0 commit was caught by CI on this — `STALE_THRESHOLD=$((28 * 86400))`, `count=$((count + 1))`, `if ((count > 0))`. Behaviour identical; cleans the repo's style invariant.
+
+### ID registry
+
+Five new entries in `tests/fixtures/expected_ids.txt`:
+- `supply.direnv.allow_list`
+- `supply.pip.extra_index_url`
+- `supply.uv.config`
+- `gaming.client.installed`
+- `network.wifi.known_networks`
+
+### New profile
+
+- `--profile founder` — explicit union of `developer` + `web3` escalations, intended for solo founders who ship their own code AND custody crypto. Added inline (rather than computed) so the override table stays greppable and the bash 3.2 linear-lookup stays simple.
+
+### Public release
+
+This version represents the planned cutover from "iterating with one user" to "ready for wider feedback." README polish + a final read-through of `docs/AGENTS.md` precede the public announcement. The CI tripwire, JSON schema, redaction smoke tests, and stable ID contract are all stable shape from v0.2.0 onward.
+
 ## [0.4.0] - 2026-05-13
 
 ### Added
