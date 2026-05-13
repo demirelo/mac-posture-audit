@@ -6,7 +6,10 @@ load '../helpers'
   run "$REPO_ROOT/mac-posture-audit.sh" --version
 
   [ "$status" -eq 0 ]
-  [ "$output" = "mac-posture-audit 0.1.0" ]
+  # Read the canonical version directly from the script so this test
+  # doesn't drift every time we bump. The format is `SCRIPT_VERSION="x.y.z"`.
+  expected_version=$(grep -E '^SCRIPT_VERSION=' "$REPO_ROOT/mac-posture-audit.sh" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+  [ "$output" = "mac-posture-audit ${expected_version}" ]
 }
 
 @test "--help exits successfully and lists common flags" {

@@ -30,7 +30,7 @@
 # shellcheck disable=SC2088
 set -uo pipefail
 
-SCRIPT_VERSION="0.1.0"
+SCRIPT_VERSION="0.3.0"
 
 # ── State ───────────────────────────────────────────────────────────────────
 PASS_N=0
@@ -211,6 +211,9 @@ PROFILE_OVERRIDES=(
   "web3|ext.simulator.advice|warn|fail"
   "web3|data.crypto.cloud_sync_exposure|warn|fail"
   "web3|apps.remote_access.present|warn|fail"
+  "web3|users.crypto_isolation_indicator|warn|fail"
+  "web3|ide.vscode.workspace_trust|warn|fail"
+  "web3|ide.cursor.workspace_trust|warn|fail"
   # paranoid — high-threat user; lock down everything.
   "paranoid|ext.wallet|warn|fail"
   "paranoid|supply.npm.ignorescripts|warn|fail"
@@ -226,6 +229,9 @@ PROFILE_OVERRIDES=(
   "paranoid|backup.tm.encrypted|warn|fail"
   "paranoid|data.crypto.cloud_sync_exposure|warn|fail"
   "paranoid|apps.remote_access.present|warn|fail"
+  "paranoid|users.crypto_isolation_indicator|warn|fail"
+  "paranoid|ide.vscode.workspace_trust|warn|fail"
+  "paranoid|ide.cursor.workspace_trust|warn|fail"
   "paranoid|update.auto|warn|fail"
   "paranoid|cred.docker.auth|warn|fail"
   # developer — supply chain matters; wallet-warn keeps default semantic.
@@ -3252,6 +3258,140 @@ section_23_device_mgmt_privacy() {
 
 }
 
+section_24_ide_trust() {
+  # ═════════════════════════════════════════════════════════════════════════════
+  # 24 · IDE Workspace Trust + Wallet Isolation Composite
+  # ═════════════════════════════════════════════════════════════════════════════
+  # IDE workspace trust is the in-editor defence against the "open malicious
+  # repo → tasks.json autoruns" attack pattern. VS Code shipped Workspace
+  # Trust in 1.57; Cursor inherits it. When enabled (the default), opening
+  # an untrusted folder disables task auto-run, language servers that opt
+  # in, and extensions that opt in to restricted mode. When the user sets
+  # security.workspace.trust.enabled=false they've reverted to the
+  # pre-1.57 behaviour where every cloned repo can immediately execute code.
+  #
+  # We deliberately use grep, not a JSONC parser. VS Code's settings.json
+  # is JSONC (JSON with comments + trailing commas), and shelling out to a
+  # parser would be a portability headache for what is essentially a
+  # string-match on three well-known keys. The trade-off: a setting buried
+  # inside a comment, or split awkwardly across lines, can be missed. We
+  # document this and prefer false negatives ("looks OK") over false
+  # positives.
+  section "24 · IDE Workspace Trust + Wallet Isolation"
+
+  # IDE_APP_ROOTS is overridable so tests can scan a sandbox dir instead
+  # of /Applications on the runner machine — otherwise installed VS Code
+  # / Cursor on the developer's actual Mac contaminates "not detected"
+  # baselines.
+  if [[ -z "${IDE_APP_ROOTS+set}" ]]; then
+    IDE_APP_ROOTS=("/Applications" "$HOME/Applications")
+  fi
+
+  # _check_ide_trust LABEL ID SETTINGS_FILE APP_BUNDLE
+  # Emits exactly one row per IDE. Skip if no settings file and no app
+  # bundle visible under IDE_APP_ROOTS. Otherwise grep the settings file
+  # for the three known-bad workspace-trust opt-outs.
+  _check_ide_trust() {
+    local label="$1" id="$2" settings_file="$3" bundle="$4"
+    local app_present=false app_root
+    for app_root in ${IDE_APP_ROOTS[@]+"${IDE_APP_ROOTS[@]}"}; do
+      if [[ -d "$app_root/$bundle" ]]; then
+        app_present=true
+        break
+      fi
+    done
+    if [[ ! -f "$settings_file" && "$app_present" == "false" ]]; then
+      skip "$label not detected (no settings file, no app bundle)" "" "$id"
+      return
+    fi
+    if [[ ! -f "$settings_file" ]]; then
+      # App installed but no user settings yet — defaults apply (trust on).
+      pass "$label installed; no user settings override workspace trust defaults" "$id"
+      return
+    fi
+    # Grep is fed the file directly so we don't read large files into bash.
+    # The regex tolerates whitespace between key/colon/value to match the
+    # most common formatting choices. JSONC comments are NOT stripped:
+    # documented limitation in the section header.
+    local issues=()
+    if grep -qE '"security\.workspace\.trust\.enabled"[[:space:]]*:[[:space:]]*false' "$settings_file" 2>/dev/null; then
+      issues+=("workspace trust DISABLED")
+    fi
+    if grep -qE '"security\.workspace\.trust\.untrustedFiles"[[:space:]]*:[[:space:]]*"open"' "$settings_file" 2>/dev/null; then
+      issues+=("untrusted files auto-open")
+    fi
+    if grep -qE '"security\.workspace\.trust\.startupPrompt"[[:space:]]*:[[:space:]]*"never"' "$settings_file" 2>/dev/null; then
+      issues+=("startup prompt suppressed")
+    fi
+    if [[ ${#issues[@]} -eq 0 ]]; then
+      pass "$label: workspace trust at defaults (enabled)" "$id"
+      return
+    fi
+    # Any disable → fail; the other two are warnings.
+    local disabled=false issue
+    for issue in "${issues[@]}"; do
+      [[ "$issue" == "workspace trust DISABLED" ]] && disabled=true
+    done
+    local joined
+    joined=$(printf '%s; ' "${issues[@]}")
+    joined="${joined%; }"
+    if [[ "$disabled" == "true" ]]; then
+      fail "$label workspace trust posture: ${joined}" "Re-enable in Cmd-, → search 'workspace trust' → check 'Security: Workspace Trust Enabled'. Opening untrusted repos with trust off auto-runs tasks.json, scripts in language servers, and extension code." "$id"
+    else
+      warn "$label workspace trust posture: ${joined}" "Set 'security.workspace.trust.untrustedFiles' to 'prompt' (the default), and 'security.workspace.trust.startupPrompt' to 'always' or 'once'. Both protect against malicious-repo auto-run." "$id"
+    fi
+  }
+
+  _check_ide_trust \
+    "VS Code" \
+    "ide.vscode.workspace_trust" \
+    "$HOME/Library/Application Support/Code/User/settings.json" \
+    "Visual Studio Code.app"
+
+  _check_ide_trust \
+    "Cursor" \
+    "ide.cursor.workspace_trust" \
+    "$HOME/Library/Application Support/Cursor/User/settings.json" \
+    "Cursor.app"
+
+  # users.crypto_isolation_indicator — cross-section composite.
+  # Fires only when wallet extensions are present (ext.wallet has emitted
+  # warn or fail; pass means no wallets, skip means N/A). Measures whether
+  # the wallet workflow is isolated from everyday browsing surface:
+  #   1. Multiple human user accounts (user.human.count = pass) — so the
+  #      wallet user can be separate from the daily-driver user.
+  #   2. Default browser is the recommended baseline (browser.default = pass
+  #      or skip) — implying random-link browsing happens in a different
+  #      browser from the one holding the wallet, OR the user has
+  #      consciously chosen their browser.
+  # We deliberately do NOT include the FIDO2 gap here — that's its own
+  # twofa.fido_gap composite. Keeping the indicators tightly scoped.
+  local wallet_state
+  wallet_state=$(_status_of "ext.wallet")
+  if [[ "$wallet_state" != "warn" && "$wallet_state" != "fail" ]]; then
+    skip "Wallet isolation N/A (no wallet extensions detected)" "" "users.crypto_isolation_indicator"
+  else
+    local gaps=()
+    local users_state browser_state
+    users_state=$(_status_of "user.human.count")
+    browser_state=$(_status_of "browser.default")
+    if [[ "$users_state" != "pass" ]]; then
+      gaps+=("single user account on this Mac")
+    fi
+    if [[ "$browser_state" == "warn" ]]; then
+      gaps+=("default browser is the same risk surface as the wallet browser")
+    fi
+    if [[ ${#gaps[@]} -eq 0 ]]; then
+      pass "Wallet workflow shows isolation indicators (multi-user + non-default-browser posture)" "users.crypto_isolation_indicator"
+    else
+      local joined
+      joined=$(printf '%s + ' "${gaps[@]}")
+      joined="${joined% + }"
+      warn "Wallet isolation gaps: ${joined}" "Highest-leverage fix: dedicated macOS user account for wallet operations, accessed only when signing. Random-link browsing stays on the main account." "users.crypto_isolation_indicator"
+    fi
+  fi
+}
+
 run_all_sections() {
   section_01_system_integrity
   section_02_login_lock
@@ -3276,6 +3416,7 @@ run_all_sections() {
   section_21_updates_findmy
   section_22_persistence_tcc
   section_23_device_mgmt_privacy
+  section_24_ide_trust
 }
 
 _diff_parse_rows() {

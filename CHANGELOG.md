@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.3.0] - 2026-05-13
 
 ### Added
 
@@ -13,6 +13,8 @@ All notable changes to this project will be documented in this file.
 - **`apps.remote_access.present`** (Section 22) — detects AnyDesk, TeamViewer (+ Host), Splashtop (Business + Streamer), RustDesk, Chrome Remote Desktop, LogMeIn, GoToMyPC, ScreenConnect / ConnectWise Control, RealVNC, VNC Viewer, Parsec under `/Applications` and `~/Applications`. Closes the most common "fake interview" / ClickFake crypto-drainer playbook gap: attacker convinces target to install a remote-control app for a "screen-share interview," grants Accessibility + Screen Recording, drains wallets. Default `warn`; `web3` and `paranoid` profiles escalate to `fail`. App names are listed in the terminal label, redacted to a count under `--redact`. Brand list is overridable via `APP_ROOTS` env for tests.
 - **`sandbox.runtime.present`** (Section 22) — informational nudge. Detects Docker.app, OrbStack.app, UTM.app, Parallels Desktop, VMware Fusion (via app bundles) and Lima / Colima (via `command -v`). Emits `skip` either way: present gets a positive acknowledgement with a use-case hint ("use this for untrusted npm/pip packages"); absent gets a recommendation to install OrbStack or UTM. `SANDBOX_CLI_BINS` env is overridable for tests.
 - **`cloud.icloud.desktop_documents_sync`** (Section 19) — detects whether Apple's "Desktop & Documents Folders in iCloud Drive" feature is on by probing for `~/Library/Mobile Documents/com~apple~CloudDocs/Desktop` and `~/Library/Mobile Documents/com~apple~CloudDocs/Documents` as real directories. When on, every file on the user's Desktop or in Documents is uploaded to iCloud and replicated to every signed-in device — a major blast-radius expander, especially when the user drags wallet seed material, tax docs, or `Vault.sparsebundle` to the Desktop "temporarily." Default `warn`; surfaces *which* folders are redirected.
+- **`ide.vscode.workspace_trust`** + **`ide.cursor.workspace_trust`** (new Section 24) — per-IDE workspace trust posture. VS Code shipped Workspace Trust in 1.57 as the in-editor defence against the "open malicious repo → tasks.json autoruns" attack; Cursor inherits it. The check greps each IDE's `settings.json` (`~/Library/Application Support/{Code,Cursor}/User/settings.json`) for three known-bad opt-outs: `security.workspace.trust.enabled: false` (hard `fail` — reverts to pre-1.57 unsafe behaviour), `security.workspace.trust.untrustedFiles: "open"` (`warn`), and `security.workspace.trust.startupPrompt: "never"` (`warn`). Skips with `not detected` if neither settings file nor app bundle exists; passes with `installed; no user settings` when the app is present but the user hasn't overridden defaults. `IDE_APP_ROOTS` env is overridable for tests. JSONC comments are not stripped — a documented limitation; we prefer false negatives ("looks OK") over false positives. `web3` and `paranoid` profiles escalate `warn → fail`.
+- **`users.crypto_isolation_indicator`** (Section 24) — cross-section composite that fires only when wallet extensions are present (`ext.wallet` post-profile status is `warn` or `fail`). Measures whether the wallet workflow has isolation indicators by reading `user.human.count` (multi-user account posture) and `browser.default` (whether the default risk-surface browser overlaps with the wallet browser). `skip` if no wallet detected, `pass` if both indicators are healthy, `warn` if any indicator is missing (label enumerates the specific gaps). `web3` and `paranoid` profiles escalate `warn → fail`. Tightly scoped — deliberately does NOT roll in the FIDO2 gap; that's its own `twofa.fido_gap` composite.
 
 ### Profile overrides
 
@@ -21,6 +23,12 @@ All notable changes to this project will be documented in this file.
 - `paranoid | backup.tm.encrypted | warn → fail`
 - `web3 | apps.remote_access.present | warn → fail`
 - `paranoid | apps.remote_access.present | warn → fail`
+- `web3 | ide.vscode.workspace_trust | warn → fail`
+- `paranoid | ide.vscode.workspace_trust | warn → fail`
+- `web3 | ide.cursor.workspace_trust | warn → fail`
+- `paranoid | ide.cursor.workspace_trust | warn → fail`
+- `web3 | users.crypto_isolation_indicator | warn → fail`
+- `paranoid | users.crypto_isolation_indicator | warn → fail`
 
 ### Tests
 
@@ -28,6 +36,7 @@ All notable changes to this project will be documented in this file.
 - Five new `tests/sections/18_backups.bats` cases covering the four `backup.tm.encrypted` outcomes (pass / warn / skip-no-destination / skip-older-tmutil) plus a paranoid-profile escalation case.
 - Nine new `tests/sections/22_persistence_tcc.bats` cases — remote-access absence baseline, AnyDesk-only warn, TeamViewer+RustDesk multi-find, web3 + paranoid escalation to fail, label redaction under `--redact`; sandbox no-runtime nudge, OrbStack positive ack, Docker+UTM multi-list. All use a sandbox `APP_ROOTS` so detection doesn't depend on what's installed on the runner machine.
 - New `tests/sections/19_icloud.bats` — 5 cases for `cloud.icloud.desktop_documents_sync`: baseline pass, iCloud root present but no redirected folders (still pass), Desktop-only warn, Documents-only warn, both-redirected warn with combined label.
+- New `tests/sections/24_ide_trust.bats` — 16 cases. IDE block: no-IDE skip, VS Code-installed-no-settings pass, three opt-out failure/warn cases each in isolation, all-three-combined fail (DISABLE dominates), clean settings pass, Cursor-only fail, two web3 escalation cases. Composite block: no-wallet skip, healthy-indicators pass, single-gap warn (each variant), combined-gap warn, web3 escalation to fail. `IDE_APP_ROOTS` sandbox + a `set_status` helper that pre-seeds `STATUS_BY_ID` so composite dependencies don't need section orchestration.
 
 ### Fixtures
 
@@ -38,10 +47,11 @@ All notable changes to this project will be documented in this file.
 
 - `APP_ROOTS` — array of directories to scan for risky/sandbox apps. Defaults to `/Applications $HOME/Applications` in production; bats sets it to a `$BATS_TEST_TMPDIR/apps` sandbox.
 - `SANDBOX_CLI_BINS` — array of CLI runtime binaries to probe via `command -v`. Defaults to `lima colima`; tests set to empty array to deterministically suppress lookups against the runner's `$PATH`.
+- `IDE_APP_ROOTS` — array of directories to scan for IDE app bundles. Same shape as `APP_ROOTS`, separated so apps and IDEs can be sandboxed independently.
 
 ### ID registry
 
-Seven new entries in `tests/fixtures/expected_ids.txt`:
+Ten new entries in `tests/fixtures/expected_ids.txt`:
 - `backup.tm.encrypted`
 - `data.ssh.cloud_sync_exposure`
 - `data.crypto.cloud_sync_exposure`
@@ -49,6 +59,13 @@ Seven new entries in `tests/fixtures/expected_ids.txt`:
 - `apps.remote_access.present`
 - `sandbox.runtime.present`
 - `cloud.icloud.desktop_documents_sync`
+- `ide.vscode.workspace_trust`
+- `ide.cursor.workspace_trust`
+- `users.crypto_isolation_indicator`
+
+### New section
+
+- Section 24 — IDE Workspace Trust + Wallet Isolation. Two per-IDE checks plus the cross-section wallet-isolation composite. Wired into `run_all_sections()` after `section_23_device_mgmt_privacy`.
 
 ## [0.1.0] - 2026-05-10
 

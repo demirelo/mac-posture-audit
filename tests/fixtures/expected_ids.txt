@@ -53,6 +53,8 @@ git.signing.allowedsigners
 git.signing.enabled
 icloud.adp
 icloud.drive.active
+ide.cursor.workspace_trust
+ide.vscode.workspace_trust
 icloud.savetocloud
 icloud.signedin
 login.autologin.disabled
@@ -128,4 +130,5 @@ user.admin.count
 user.admin.svcaccts
 user.human.count
 user.sudo.nopasswd
+users.crypto_isolation_indicator
 wallet.hw.installed

@@ -54,7 +54,7 @@ These are pairs/triples of rows that are individually low-signal or `skip`/`warn
 |---|---|---|---|
 | 3.1 | Encrypted-DNS gap | `network.dns.encrypted` | ✅ baked in |
 | 3.2 | Backup desert | `backup.recovery_path` | ✅ baked in |
-| 3.3 | Wallet exposure on main user | — | agent-only (covered partially by `--profile web3`) |
+| 3.3 | Wallet exposure on main user | `users.crypto_isolation_indicator` | ✅ baked in |
 | 3.4 | Plaintext disk on theft | `system.theft_resistance` | ✅ baked in |
 | 3.5 | SSH risk surface | `ssh.posture` | ✅ baked in |
 | 3.6 | Supply-chain composite | `supply.posture` | ✅ baked in |
@@ -65,6 +65,7 @@ These are pairs/triples of rows that are individually low-signal or `skip`/`warn
 | 3.11 | iCloud blast radius | `cloud.icloud.desktop_documents_sync` + `data.*.cloud_sync_exposure` | ✅ baked in (per-check) |
 | 3.12 | Remote-access crypto-theft surface | `apps.remote_access.present` + `tcc.holders` + `ext.wallet` | ✅ baked in (per-check) |
 | 3.13 | Cloud-sync exfiltration | `data.ssh.cloud_sync_exposure` + `data.crypto.cloud_sync_exposure` + `data.dotfiles.cloud_sync_exposure` | ✅ baked in (per-domain) |
+| 3.14 | IDE malicious-repo auto-run | `ide.vscode.workspace_trust` + `ide.cursor.workspace_trust` | ✅ baked in (per-IDE) |
 
 ### 3.1 Encrypted-DNS gap → `network.dns.encrypted`
 
@@ -85,9 +86,16 @@ iCloud Drive is treated as a *partial* source — it covers `~/Documents` + `~/D
 
 Note: "iCloud Backup" (the iPhone feature) does not apply to Macs. iCloud Drive sync is the relevant signal.
 
-### 3.3 Wallet exposure on main user — agent-only
+### 3.3 Wallet exposure on main user → `users.crypto_isolation_indicator`
 
-If `ext.wallet` is present, `user.human.count` is 1, and `browser.default` is the same browser holding the wallet, there's no isolation between random browsing and signing transactions. The audit *partially* covers this through `--profile web3` (which escalates `ext.wallet` to `fail`), but the broader "single-user Mac with wallets and no FIDO key" pattern is still worth surfacing yourself. Recommend either a dedicated macOS user for the wallet, or at minimum a separate browser profile.
+Combines `ext.wallet` (post-profile) + `user.human.count` + `browser.default`. Fires only when wallet extensions are present. Two isolation indicators are checked:
+
+1. **Multiple human user accounts** (`user.human.count = pass`) — the user can create a dedicated macOS user for wallet operations, accessed only when signing.
+2. **Default browser is at the recommended baseline** (`browser.default = pass`) — implying random-link browsing happens in a browser separate from the one holding the wallet.
+
+`pass` = both indicators healthy. `warn` = one or two missing, label enumerates which. `skip` = no wallet detected (composite N/A). Under `--profile web3` / `paranoid`, the `warn` is escalated to `fail` via `PROFILE_OVERRIDES` — same pattern as `ssh.posture` and `supply.posture`.
+
+The composite deliberately does NOT roll in the FIDO2 gap (that's its own `twofa.fido_gap` row, §3.10), nor the broader cloud-sync exposures (§3.13), nor `apps.remote_access.present` (§3.12). Each composite is tightly scoped so an LLM reviewer can pair them as needed.
 
 ### 3.4 Plaintext disk on theft → `system.theft_resistance`
 
@@ -146,6 +154,25 @@ The script splits this pattern across three IDs by sensitivity domain:
 Detection uses `cd "$d" && pwd -P` (or `dirname` + `pwd -P` + basename for files) so symlinks resolve to their real on-disk path before matching the cloud-root patterns in `_path_in_cloud_root`. A real example caught in the wild: `~/.ssh` symlinked into `~/Library/Mobile Documents/com~apple~CloudDocs/dotfiles/.ssh` so the user could "share dotfiles across machines" — every key sitting in Apple's storage and on every other Mac signed into the same Apple ID.
 
 When all three fire on the same Mac, do not list them as three separate problems. Surface as: "Your home directory is layered over a cloud-sync root. Move it back, or move the sensitive subdirectories out, before doing anything else."
+
+### 3.14 IDE malicious-repo auto-run → `ide.vscode.workspace_trust` + `ide.cursor.workspace_trust`
+
+VS Code shipped Workspace Trust in 1.57 (2021) as the in-editor defence against the most common "open malicious repo → tasks.json autoruns" attack chain. Cursor inherits the same machinery. With trust enabled (the default), opening an untrusted folder:
+
+- Disables `tasks.json` auto-run on folder open.
+- Disables language servers and extensions that opted in to restricted mode.
+- Disables debugger configurations.
+- Shows a prompt before letting any of the above run.
+
+Three known-bad opt-outs land the user back in the pre-1.57 unsafe world:
+
+- `security.workspace.trust.enabled: false` — hard `fail`. Every cloned repo can immediately execute code on open. The most common attack chain for a developer wallet user is: target receives a "code review for a job interview" link, clones the repo, the IDE auto-runs a `tasks.json` step that exfiltrates `~/.ssh/`, `~/.aws/`, or browser cookies for wallet sessions.
+- `security.workspace.trust.untrustedFiles: "open"` — `warn`. Dropped files open without the trust prompt.
+- `security.workspace.trust.startupPrompt: "never"` — `warn`. Suppresses the on-startup decision moment so the user becomes less aware of the model.
+
+The check uses `grep`, not a JSONC parser. VS Code's settings.json is JSONC (JSON with comments and trailing commas); shelling out to a parser would be a portability headache for what's essentially a string-match on three well-known keys. The documented trade-off: a setting buried inside a `//`-comment block, or split awkwardly across multiple lines with the value on its own line, can be missed. The check prefers false negatives ("looks OK") over false positives.
+
+Cross-reference: if `users.crypto_isolation_indicator` is also firing (§3.3) and `apps.remote_access.present` is on (§3.12), the IDE trust posture should be the next thing surfaced — these three together describe the full "fake interview" attack chain: tools to phish the user, no workflow isolation to contain damage, and the IDE itself acting as the payload's runtime.
 
 ## 4. Things that are NOT issues
 
