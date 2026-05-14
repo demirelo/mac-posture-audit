@@ -2,9 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.1.0] - 2026-05-14
 
-Working towards v1.1.0. Patches don't ship on `main` until the v1.1 milestone closes.
+Seven new checks across two PRs, all factored into testable `_check_*` helpers. Bumps the registry from 146 to 151 IDs. Read-only and bash 3.2 compatibility preserved throughout.
 
 ### Added (PR 8 — three highest-signal new checks)
 
@@ -36,6 +36,40 @@ Three new entries in `tests/fixtures/expected_ids.txt`:
 - `network.listening.all_interfaces`
 - `ssh.config.risky_options`
 - `browser.remote_debugging`
+
+### Added (PR 9 — informational and behavioral coverage)
+
+- **`browser.password_autofill`** (Section 9, `_check_browser_password_autofill` helper) — for each detected Chromium-based profile (Chrome / Brave / Edge / Arc, across `Default` and `Profile N` directories), greps `Preferences` JSON for `"credentials_enable_service": false`. When absent or `true` (Chromium's default-on), the browser-native password manager autofills site logins; a phishing site mimicking a wallet-exchange URL can trigger that autofill. Default `skip` with advisory hint; `web3` / `paranoid` / `founder` escalate `skip → warn`. Profile names redacted under `--redact`.
+- **`update.macos.recency`** (Section 21, `_check_update_macos_recency` helper) — parses `softwareupdate --history` for the most recent system-relevant install (lines matching `macOS`, `Security Update`, `Safari`, `Rapid Security Response`) and computes its age in days. `update.auto` only verifies the auto-update setting; this catches the "auto-update on but every prompt gets 'Later'" case. Threshold: ≤45 days → pass; 46–90 days → warn ("apply pending updates"); >90 days → warn ("significantly behind"). `paranoid` profile escalates either warn to fail. Skip if `softwareupdate` is unavailable or the date can't be parsed (handles macOS-version drift in the history format).
+- **`persist.background_items`** (Section 22, `_check_persist_background_items` helper) — placeholder advisory row for the Ventura-era Background Task Manager. The natural data source (`sfltool dumpbtm`) cannot be invoked from a read-only audit because it uses AuthorizationServices to request elevation — even with `sudo -n`, macOS 13+ pops a GUI prompt ("sfltool wants to make changes") that's incompatible with the audit's no-modal-prompts invariant. The check therefore emits an informational `skip` pointing the user at the manual `sfltool dumpbtm | less` command. If we later find a signal we can read non-interactively (e.g., a user-owned plist), we'll switch to it. No profile escalation.
+- **`tcc.appleevents`** and **`tcc.camera_microphone`** (Section 22) — extend the existing TCC parser to surface AppleEvents and Camera + Microphone grants as separate rows. Both are informational by design: AppleEvents is common (Zoom / Slack / Raycast / IDE automation each request it); Camera + Microphone is common for video-conferencing apps. Pass when no clients; skip with count + holder list otherwise. Holder names redacted under `--redact`. No profile escalation — the audit's job is to surface what has been granted, not to suggest those grants are necessarily wrong.
+
+### Profile overrides (PR 9)
+
+- `web3 | browser.password_autofill | skip → warn`
+- `paranoid | browser.password_autofill | skip → warn`
+- `founder | browser.password_autofill | skip → warn`
+- `paranoid | update.macos.recency | warn → fail`
+
+### Tests (PR 9)
+
+- 4 new TCC cases appended to `tests/sections/22_persistence_tcc.bats`: QUICK-mode skip for the new IDs, no-grants pass on both, mixed AppleEvents + Camera + Microphone grants populating both rows, `--redact` holder-name suppression.
+- 4 new background-items cases also appended to `22_persistence_tcc.bats`: QUICK-mode skip, sfltool-unavailable skip, empty-output skip, count parsing across `=== Item ===` delimiters, zero-items pass.
+- New `tests/sections/09_browser_password_autofill.bats` — 11 cases: no browsers, Chrome `Default` with autofill explicitly disabled (pass), with `credentials_enable_service: true` (skip-advisory), key absent (counts as enabled — Chromium default-on), multi-profile filtering, Chrome + Brave both enabled, both disabled, web3 + founder + paranoid escalations, `--redact` brand:profile suppression.
+- New `tests/sections/21_update_recency.bats` — 10 cases: softwareupdate-missing skip, empty-history skip, no-system-relevant-rows skip, 10d pass, 45d pass (at-threshold), 60d warn, 120d warn ('significantly behind'), paranoid escalation to fail, multiple installs (most recent wins), Security Update lines count as system-relevant.
+
+### ID registry (PR 9)
+
+Five new entries in `tests/fixtures/expected_ids.txt`:
+- `browser.password_autofill`
+- `update.macos.recency`
+- `persist.background_items`
+- `tcc.appleevents`
+- `tcc.camera_microphone`
+
+### Release
+
+- `SCRIPT_VERSION` bumped to `1.1.0`.
 
 ## [1.0.1] - 2026-05-14
 

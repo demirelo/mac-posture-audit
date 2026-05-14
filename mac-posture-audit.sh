@@ -30,7 +30,7 @@
 # shellcheck disable=SC2088
 set -uo pipefail
 
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.1.0"
 
 # ── State ───────────────────────────────────────────────────────────────────
 PASS_N=0
@@ -220,6 +220,7 @@ PROFILE_OVERRIDES=(
   "web3|browser.version_currency|warn|fail"
   "web3|network.vpn.killswitch|warn|fail"
   "web3|browser.remote_debugging|warn|fail"
+  "web3|browser.password_autofill|skip|warn"
   # paranoid — high-threat user; lock down everything.
   "paranoid|ext.wallet|warn|fail"
   "paranoid|supply.npm.ignorescripts|warn|fail"
@@ -247,6 +248,8 @@ PROFILE_OVERRIDES=(
   "paranoid|network.listening.all_interfaces|warn|fail"
   "paranoid|ssh.config.risky_options|warn|fail"
   "paranoid|browser.remote_debugging|warn|fail"
+  "paranoid|browser.password_autofill|skip|warn"
+  "paranoid|update.macos.recency|warn|fail"
   # developer — supply chain matters; wallet-warn keeps default semantic.
   # cred.shellrc.patterns is intentionally absent: it already emits as `fail`
   # for every profile (the patterns are high-confidence prefixed tokens —
@@ -284,6 +287,7 @@ PROFILE_OVERRIDES=(
   "founder|network.listening.all_interfaces|warn|fail"
   "founder|ssh.config.risky_options|warn|fail"
   "founder|browser.remote_debugging|warn|fail"
+  "founder|browser.password_autofill|skip|warn"
 )
 
 # Apply the profile severity table to a (status, id) pair. Returns the
@@ -1802,6 +1806,68 @@ section_09_browsers() {
   fi
 
   _check_browser_remote_debugging
+  _check_browser_password_autofill
+}
+
+_check_browser_password_autofill() {
+  # browser.password_autofill — for each detected Chromium-based browser
+  # profile (Chrome / Brave / Edge / Arc), grep the Preferences file for
+  # the native password-manager and autofill settings:
+  #   - "credentials_enable_service": false → password manager OFF (pass-equivalent)
+  #   - "autofill.credit_card_enabled": false → autofill cards OFF
+  # When credentials_enable_service is true (the Chromium default), the
+  # browser-native password manager autofills site logins. A phishing
+  # site that mimics a wallet exchange URL (coinbase-login.tld) can
+  # trigger that autofill. The recommended posture is to disable the
+  # native password manager and use 1Password / Bitwarden as the only
+  # autofill source.
+  #
+  # JSONC-not-required-here: Chromium Preferences is strict JSON without
+  # comments, but we use grep anyway for portability. The keys are
+  # well-known and stable.
+  local CHROMIUM_PROFILE_ROOTS=(
+    "Brave|$HOME/Library/Application Support/BraveSoftware/Brave-Browser"
+    "Chrome|$HOME/Library/Application Support/Google/Chrome"
+    "Edge|$HOME/Library/Application Support/Microsoft Edge"
+    "Arc|$HOME/Library/Application Support/Arc/User Data"
+  )
+  local AUTOFILL_ENABLED=() AUTOFILL_CHECKED=0
+  local row brand root pref_files pref brand_profile
+  for row in "${CHROMIUM_PROFILE_ROOTS[@]}"; do
+    brand="${row%%|*}"
+    root="${row##*|}"
+    [[ -d "$root" ]] || continue
+    # Collect Preferences files across Default + Profile N
+    pref_files=()
+    [[ -f "$root/Default/Preferences" ]] && pref_files+=("$root/Default/Preferences")
+    while IFS= read -r pref; do
+      [[ -n "$pref" ]] && pref_files+=("$pref")
+    done < <(find "$root" -maxdepth 2 -type f -name 'Preferences' -path '*/Profile */Preferences' 2>/dev/null)
+    for pref in ${pref_files[@]+"${pref_files[@]}"}; do
+      AUTOFILL_CHECKED=$((AUTOFILL_CHECKED + 1))
+      brand_profile="${brand}:$(basename "$(dirname "$pref")")"
+      # Explicit `false` → disabled. Any other state (true / absent) →
+      # default-on. Chromium defaults to enabled, so absence is enabled.
+      if grep -qE '"credentials_enable_service"[[:space:]]*:[[:space:]]*false' "$pref" 2>/dev/null; then
+        :
+      else
+        AUTOFILL_ENABLED+=("$brand_profile")
+      fi
+    done
+  done
+  if [[ "$AUTOFILL_CHECKED" -eq 0 ]]; then
+    skip "No Chromium browser profiles found to check autofill" "" "browser.password_autofill"
+    return
+  fi
+  if [[ ${#AUTOFILL_ENABLED[@]} -eq 0 ]]; then
+    pass "Browser native password manager / autofill disabled across all checked profiles ($AUTOFILL_CHECKED)" "browser.password_autofill"
+    return
+  fi
+  if [[ "$REDACT" == "true" ]]; then
+    skip "${#AUTOFILL_ENABLED[@]} of $AUTOFILL_CHECKED browser profile(s) have native password manager / autofill enabled (Chromium default)" "A phishing site mimicking a wallet-exchange URL can trigger autofill of saved logins. Disable the native password manager and use 1Password / Bitwarden as the sole autofill source. Per browser: Settings → Autofill → Passwords → 'Offer to save passwords' off." "browser.password_autofill"
+  else
+    skip "Browser native password manager enabled: ${AUTOFILL_ENABLED[*]} ($AUTOFILL_CHECKED profile(s) checked)" "A phishing site mimicking a wallet-exchange URL can trigger autofill of saved logins. Disable the native password manager and use 1Password / Bitwarden as the sole autofill source. Per browser: Settings → Autofill → Passwords → 'Offer to save passwords' off." "browser.password_autofill"
+  fi
 }
 
 _check_browser_remote_debugging() {
@@ -2103,10 +2169,13 @@ _check_ssh_config_risky_options() {
     # Section break: a `Host` or `Match` line starts a new scope.
     if [[ "$stripped" =~ ^[Hh]ost[[:space:]]+(.*)$ ]]; then
       host_pattern="${BASH_REMATCH[1]}"
-      # Whether the new section applies broadly:
-      #   "Host *" or "Host * !ignored.tld" etc.
+      # Whether the new section applies broadly. Two patterns:
+      #   - starts with a bare `*` (e.g. "Host *", "Host * !ignored.tld")
+      #   - contains ` *` somewhere (e.g. "Host alpha *" or "Host alpha *.example")
+      # The second pattern with trailing `**` (zero-or-more) subsumes both
+      # `… *` and `… *foo`, so we don't need a separate `*\ \*` alternative.
       case "$host_pattern" in
-      \** | *\ \** | *\ \*) in_global_scope=true ;;
+      \** | *\ \**) in_global_scope=true ;;
       *) in_global_scope=false ;;
       esac
       continue
@@ -3526,6 +3595,80 @@ section_21_updates_findmy() {
     skip "Find My Mac state could not be confirmed" "Verify manually: Settings → Apple ID → Find My" "findmy.enabled"
   fi
 
+  _check_update_macos_recency
+}
+
+_check_update_macos_recency() {
+  # update.macos.recency — `update.auto` checks whether automatic update
+  # checks are enabled, not whether the user has actually applied
+  # updates. A common posture failure is "auto-update on, but every
+  # update prompt gets 'Later'"; weeks pass and the OS is exposed to
+  # patched vulnerabilities. We parse `softwareupdate --history` and
+  # find the most recent install line that looks like a macOS / system
+  # software update, then compute its age in days.
+  #
+  # Output format (from macOS 13+):
+  #   Display Name                  Version    Date              Action
+  #   ------------                  -------    ----              ------
+  #   macOS Sonoma 14.5             14.5       05/18/2024, 11:23 Installed
+  #   Safari Technology Preview     20.0       06/01/2024, 09:00 Installed
+  #
+  # We're looking for "macOS" or "Security Update" or "Safari" or
+  # "Command Line Tools"; the first three indicate the user has
+  # actually applied a system-level update.
+  #
+  # `softwareupdate` runs without sudo for --history. It does NOT touch
+  # the network (the --no-scan flag is for paranoia; some macOS
+  # versions check the catalog even with --history).
+  if ! command -v softwareupdate >/dev/null 2>&1; then
+    skip "softwareupdate not available; cannot check update recency" "" "update.macos.recency"
+    return
+  fi
+  local SU_OUT
+  SU_OUT=$(softwareupdate --history --no-scan 2>/dev/null || softwareupdate --history 2>/dev/null || true)
+  if [[ -z "$SU_OUT" ]]; then
+    skip "softwareupdate --history returned no rows" "Either no updates have ever been applied, or the history file is missing. Verify: softwareupdate --history" "update.macos.recency"
+    return
+  fi
+  # Parse the most recent date column. Strategy: find any line that
+  # looks like a system-relevant install, extract the MM/DD/YYYY
+  # token, convert each to an epoch, take the max.
+  local line max_epoch=0 date_token epoch
+  while IFS= read -r line; do
+    # Skip header + separator rows.
+    case "$line" in
+    "" | Display\ Name* | ----*) continue ;;
+    esac
+    # Filter to system-relevant rows. Anything else (Xcode CLI tools,
+    # Migration Assistant, Pages, etc.) doesn't tell us about the OS.
+    case "$line" in
+    *macOS* | *Security\ Update* | *Safari* | *Rapid\ Security\ Response*) ;;
+    *) continue ;;
+    esac
+    # Extract a MM/DD/YYYY token from the row.
+    date_token=$(printf '%s' "$line" | grep -oE '[0-9]{2}/[0-9]{2}/[0-9]{4}' | head -1)
+    [[ -n "$date_token" ]] || continue
+    # `date -j -f` parses the literal date; macOS-specific syntax.
+    epoch=$(date -j -f "%m/%d/%Y" "$date_token" +%s 2>/dev/null || true)
+    [[ -n "$epoch" ]] || continue
+    if [[ "$epoch" -gt "$max_epoch" ]]; then
+      max_epoch="$epoch"
+    fi
+  done <<<"$SU_OUT"
+  if [[ "$max_epoch" -eq 0 ]]; then
+    skip "Could not parse a system update date from softwareupdate --history" "Format may have changed; consider opening an issue with 'softwareupdate --history | head' (no PII expected, but redact at will)." "update.macos.recency"
+    return
+  fi
+  local now_epoch age_days
+  now_epoch=$(date +%s)
+  age_days=$(((now_epoch - max_epoch) / 86400))
+  if [[ "$age_days" -le 45 ]]; then
+    pass "Most recent macOS / Safari / Security update: $age_days day(s) ago" "update.macos.recency"
+  elif [[ "$age_days" -le 90 ]]; then
+    warn "Most recent macOS / Safari / Security update: $age_days days ago — apply pending updates" "Auto-update enabled is not the same as updates applied. Open System Settings → General → Software Update and install anything offered. Many CVEs ship in Safari + Security Update bundles between major macOS releases." "update.macos.recency"
+  else
+    warn "Most recent macOS / Safari / Security update: $age_days days ago — significantly behind" "More than 90 days since the last system-level update. Open System Settings → General → Software Update; the user-visible state ('No updates available') can lie when a deferral has been set. Check with: softwareupdate --list --no-scan." "update.macos.recency"
+  fi
 }
 
 section_22_persistence_tcc() {
@@ -3649,9 +3792,13 @@ section_22_persistence_tcc() {
   # the per-user DB. A partial read is SKIP, never a clean PASS.
   if $QUICK; then
     skip "TCC permission holders (requires sudo)" "" "tcc.holders"
+    skip "TCC AppleEvents holders (requires sudo)" "" "tcc.appleevents"
+    skip "TCC Camera + Microphone holders (requires sudo)" "" "tcc.camera_microphone"
   else
     if ! command -v sqlite3 >/dev/null 2>&1; then
       skip "TCC permission holders unreadable — sqlite3 not found" "" "tcc.holders"
+      skip "TCC AppleEvents holders unreadable — sqlite3 not found" "" "tcc.appleevents"
+      skip "TCC Camera + Microphone holders unreadable — sqlite3 not found" "" "tcc.camera_microphone"
     else
       TCC_OUT=""
       TCC_READABLE=0
@@ -3700,6 +3847,8 @@ section_22_persistence_tcc() {
 
       if [[ "$TCC_READABLE" -eq 0 ]]; then
         skip "TCC databases not accessible (needs sudo + Full Disk Access for this terminal)" "Grant: System Settings → Privacy & Security → Full Disk Access → add your terminal" "tcc.holders"
+        skip "TCC AppleEvents holders not readable" "" "tcc.appleevents"
+        skip "TCC Camera + Microphone holders not readable" "" "tcc.camera_microphone"
       else
         TCC_COUNT=$( (printf '%s\n' "$TCC_OUT" | grep -c '.') || true)
         TCC_COUNT=${TCC_COUNT:-0}
@@ -3720,6 +3869,41 @@ section_22_persistence_tcc() {
           skip "TCC partial scan: $TCC_COUNT permission grant(s) in readable DB(s); unreadable scope(s): ${TCC_UNREADABLE_LABELS% }" "Grant Full Disk Access to this terminal and rerun before treating TCC as clean." "tcc.holders"
         else
           pass "$TCC_COUNT TCC grant(s); none in the most-sensitive list" "tcc.holders"
+        fi
+
+        # tcc.appleevents — AppleEvents grants are common (Zoom/Slack/IDE
+        # automation) but worth surfacing because they enable cross-app
+        # scripting; a compromised AppleEvents client can drive other
+        # apps. Informational only, no profile escalation.
+        AE_HOLDERS=$(printf '%s\n' "$TCC_OUT" | awk -F'|' -v s="kTCCServiceAppleEvents" '$2 == s { print $1 ":" $3 }' | paste -sd, -)
+        AE_COUNT=$( (printf '%s\n' "$TCC_OUT" | awk -F'|' -v s="kTCCServiceAppleEvents" '$2 == s' | grep -c '.') || true)
+        AE_COUNT=${AE_COUNT:-0}
+        if [[ "$AE_COUNT" -eq 0 ]]; then
+          pass "TCC AppleEvents: no approved clients" "tcc.appleevents"
+        elif [[ "$REDACT" == "true" ]]; then
+          skip "TCC AppleEvents: $AE_COUNT approved client(s)" "Each can drive other apps via Apple Events. Expected for Zoom / Slack / Raycast / IDE automation; review unfamiliar clients in System Settings → Privacy & Security → Automation." "tcc.appleevents"
+        else
+          skip "TCC AppleEvents: $AE_COUNT approved client(s) — ${AE_HOLDERS}" "Each can drive other apps via Apple Events. Expected for Zoom / Slack / Raycast / IDE automation; review unfamiliar clients in System Settings → Privacy & Security → Automation." "tcc.appleevents"
+        fi
+
+        # tcc.camera_microphone — combined count for Camera + Microphone.
+        # Both common for video-conferencing apps and browsers; surface
+        # as info only. Camera is the more sensitive of the two (visual
+        # surveillance vs ambient audio); we list both grants but don't
+        # escalate.
+        CM_HOLDERS=""
+        for svc in kTCCServiceCamera kTCCServiceMicrophone; do
+          h=$(printf '%s\n' "$TCC_OUT" | awk -F'|' -v s="$svc" '$2 == s { print $1 ":" $3 }' | paste -sd, -)
+          [[ -n "$h" ]] && CM_HOLDERS+="${svc#kTCCService} → ${h}; "
+        done
+        CM_COUNT=$( (printf '%s\n' "$TCC_OUT" | awk -F'|' '$2 == "kTCCServiceCamera" || $2 == "kTCCServiceMicrophone"' | grep -c '.') || true)
+        CM_COUNT=${CM_COUNT:-0}
+        if [[ "$CM_COUNT" -eq 0 ]]; then
+          pass "TCC Camera + Microphone: no approved clients" "tcc.camera_microphone"
+        elif [[ "$REDACT" == "true" ]]; then
+          skip "TCC Camera + Microphone: $CM_COUNT approved client(s)" "Expected for video conferencing (Zoom / Webex / Teams) and browsers. Review unfamiliar clients in System Settings → Privacy & Security → Camera / Microphone." "tcc.camera_microphone"
+        else
+          skip "TCC Camera + Microphone: $CM_COUNT approved client(s) — ${CM_HOLDERS%; }" "Expected for video conferencing (Zoom / Webex / Teams) and browsers. Review unfamiliar clients in System Settings → Privacy & Security → Camera / Microphone." "tcc.camera_microphone"
         fi
       fi
     fi
@@ -3858,6 +4042,31 @@ section_22_persistence_tcc() {
       skip "Gaming client(s) installed: ${GAMING_FOUND[*]}" "Each gaming client is an attack surface worth reviewing on a wallet-holding Mac. Steam asks for Accessibility (UI introspection); Discord is the dominant crypto-phishing channel (fake admin DMs, 'verify your wallet' links); the rest are stored-credential surfaces. Log out when unused; review TCC grants (System Settings → Privacy & Security → Accessibility / Screen Recording / Input Monitoring)." "gaming.client.installed"
     fi
   fi
+
+  _check_persist_background_items
+}
+
+_check_persist_background_items() {
+  # persist.background_items — Background Task Manager (sfltool dumpbtm)
+  # is the modern equivalent of login items + LaunchAgents combined,
+  # introduced in Ventura. It would be a great signal to count.
+  #
+  # The blocker: on macOS 13+, `sfltool dumpbtm` uses AuthorizationServices
+  # to read /var/db/com.apple.backgroundtaskmanagement/, which triggers
+  # a GUI authorization prompt ("sfltool wants to make changes"). That
+  # prompt is NOT suppressed by `sudo -n` or any non-interactive flag —
+  # the auth-framework hook runs before the binary even reads its argv.
+  #
+  # The audit's invariant is that default mode never pops modal prompts.
+  # We therefore do NOT invoke sfltool. The check stays as an advisory
+  # row pointing the user at the manual command. If we later find a
+  # signal we CAN read non-interactively (e.g. the BTM plist file at a
+  # path the user owns), we'll switch to that.
+  if ! command -v sfltool >/dev/null 2>&1; then
+    skip "sfltool not available (pre-Ventura macOS); skipping background items check" "" "persist.background_items"
+    return
+  fi
+  skip "Background items not enumerable read-only (sfltool dumpbtm triggers a GUI authorization prompt)" "To inspect manually: 'sfltool dumpbtm | less' (you'll see a one-time auth prompt). Most entries are legitimate (Dropbox / 1Password / Slack / Mail extensions); remove unfamiliar ones via System Settings → General → Login Items." "persist.background_items"
 }
 
 section_23_device_mgmt_privacy() {

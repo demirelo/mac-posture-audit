@@ -266,6 +266,77 @@ esac'
   [[ "${RESULTS_PASS[*]-}" != *"none in the most-sensitive list"* ]]
 }
 
+# ─── tcc.appleevents + tcc.camera_microphone (informational) ────────────────
+
+mock_sqlite_tcc_with_appleevents_and_camera() {
+  mock_cli_script sqlite3 '#!/usr/bin/env bash
+db="$2"
+sql="$3"
+case "$sql" in
+  "PRAGMA table_info(access);")
+    printf "0|service|TEXT|1||1\n1|client|TEXT|1||2\n2|auth_value|INTEGER|0||0\n"
+    ;;
+  *"auth_value=2"*)
+    if [[ "$db" == "/Library/Application Support/com.apple.TCC/TCC.db" ]]; then
+      printf "kTCCServiceAppleEvents|com.example.AutomationApp\nkTCCServiceCamera|com.example.SystemCam\n"
+    else
+      printf "kTCCServiceAppleEvents|com.zoom.app\nkTCCServiceMicrophone|com.zoom.app\n"
+    fi
+    ;;
+esac'
+}
+
+@test "QUICK mode emits skip for tcc.appleevents and tcc.camera_microphone" {
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded skip "TCC AppleEvents holders (requires sudo)"
+  assert_recorded skip "TCC Camera + Microphone holders (requires sudo)"
+}
+
+@test "no AppleEvents / camera grants -> pass on both" {
+  mkdir -p "$TEST_HOME/Library/Application Support/com.apple.TCC"
+  : >"$TEST_HOME/Library/Application Support/com.apple.TCC/TCC.db"
+  mock_osascript_empty
+  mock_crontab_empty
+  mock_sudo_tcc_passthrough
+  mock_sqlite_tcc_modern
+  QUICK=false
+  section_22_persistence_tcc
+  assert_recorded pass "TCC AppleEvents: no approved clients"
+  assert_recorded pass "TCC Camera + Microphone: no approved clients"
+}
+
+@test "AppleEvents + Camera + Microphone grants -> skip informational" {
+  mkdir -p "$TEST_HOME/Library/Application Support/com.apple.TCC"
+  : >"$TEST_HOME/Library/Application Support/com.apple.TCC/TCC.db"
+  mock_osascript_empty
+  mock_crontab_empty
+  mock_sudo_tcc_passthrough
+  mock_sqlite_tcc_with_appleevents_and_camera
+  QUICK=false
+  section_22_persistence_tcc
+  assert_recorded skip "TCC AppleEvents:"
+  [[ "${RESULTS_SKIP[*]}" == *"com.example.AutomationApp"* ]] || [[ "${RESULTS_SKIP[*]}" == *"com.zoom.app"* ]]
+  assert_recorded skip "TCC Camera + Microphone:"
+}
+
+@test "AppleEvents client names redacted under --redact" {
+  mkdir -p "$TEST_HOME/Library/Application Support/com.apple.TCC"
+  : >"$TEST_HOME/Library/Application Support/com.apple.TCC/TCC.db"
+  REDACT=true
+  mock_osascript_empty
+  mock_crontab_empty
+  mock_sudo_tcc_passthrough
+  mock_sqlite_tcc_with_appleevents_and_camera
+  QUICK=false
+  section_22_persistence_tcc
+  [[ "${RESULTS_SKIP[*]}" != *"com.example.AutomationApp"* ]]
+  [[ "${RESULTS_SKIP[*]}" != *"com.zoom.app"* ]]
+  assert_recorded skip "TCC AppleEvents:"
+}
+
 # ─── apps.remote_access.present ────────────────────────────────────────────
 # APP_ROOTS is overridable so we can scan a sandbox dir instead of
 # /Applications on the runner machine — otherwise the suite would
@@ -432,4 +503,33 @@ setup_app_roots_sandbox() {
   section_22_persistence_tcc
   [[ "${RESULTS_SKIP[*]}" != *"Steam"* ]]
   assert_recorded skip "1 gaming client(s) installed"
+}
+
+# ─── persist.background_items ──────────────────────────────────────────────
+# The helper deliberately does NOT invoke `sfltool dumpbtm` because that
+# command triggers a GUI authorization prompt on macOS 13+ even when
+# wrapped in `sudo -n`. The check stays as an informational advisory.
+
+@test "sfltool absent (pre-Ventura) -> skip with version hint" {
+  load_script
+  # Call the helper directly. Restricting PATH on the *full* section
+  # would also strip access to sort/tr/etc that other section_22
+  # checks need; the helper itself only does `command -v sfltool`
+  # plus the emit, so a tiny PATH is safe here.
+  empty_bin="$BATS_TEST_TMPDIR/empty-bin"
+  mkdir -p "$empty_bin"
+  PATH="$empty_bin"
+  _check_persist_background_items
+  assert_recorded skip "sfltool not available (pre-Ventura macOS)"
+}
+
+@test "sfltool present -> skip-advisory pointing at manual command" {
+  load_script
+  # Mock sfltool's presence (just needs to satisfy `command -v`);
+  # the helper never executes it, so the mock body is irrelevant.
+  mock_cli_script sfltool '#!/usr/bin/env bash
+exit 0'
+  _check_persist_background_items
+  assert_recorded skip "Background items not enumerable read-only"
+  [[ "${RESULTS_SKIP[*]}" == *"GUI authorization prompt"* ]]
 }

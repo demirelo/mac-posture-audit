@@ -17,6 +17,7 @@ boot.kexts.disabled
 boot.secure.full
 browser.default
 browser.installed
+browser.password_autofill
 browser.profile_count
 browser.remote_debugging
 browser.version_currency
@@ -89,6 +90,7 @@ network.systemextensions.filters
 network.vpn.killswitch
 network.vpn.running
 network.wifi.known_networks
+persist.background_items
 persist.cron
 persist.login_items
 persist.user.launchagents
@@ -134,10 +136,13 @@ system.gatekeeper.enabled
 system.mdm.enrolled
 system.sip.enabled
 system.theft_resistance
+tcc.appleevents
+tcc.camera_microphone
 tcc.holders
 twofa.fido_gap
 twofa.hardware.installed
 update.auto
+update.macos.recency
 user.admin.count
 user.admin.svcaccts
 user.human.count
