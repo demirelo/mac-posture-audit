@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+Working towards v1.1.0. Patches don't ship on `main` until the v1.1 milestone closes.
+
+### Added (PR 8 — three highest-signal new checks)
+
+- **`network.listening.all_interfaces`** (Section 4, `_check_listening_all_interfaces` helper) — parses `lsof -nP -iTCP -sTCP:LISTEN -F pcn` for TCP listeners bound to `0.0.0.0`, `*`, or `[::]` (the IPv4/IPv6 wildcards). Localhost-only listeners (`127.0.0.1`, `[::1]`) are explicitly excluded; interface-specific binds are assumed intentional and not flagged. Real-world failure mode: a developer runs `vite --host 0.0.0.0` / `python -m http.server` / `next dev -H 0.0.0.0` and forgets to stop it; anything on the local network can then reach the service. Default `warn`, `developer` / `founder` / `paranoid` escalate to `fail`. Under `--redact` the label drops process names and surfaces port numbers only (so a sysadmin reading a redacted report can still spot the exposure pattern).
+- **`ssh.config.risky_options`** (Section 11, `_check_ssh_config_risky_options` helper) — scope-aware parser for `~/.ssh/config` that flags three dangerous options when they apply to global scope (top-level, before any `Host` block) or `Host *` / `Match all` (wildcard) blocks: `ForwardAgent yes`, `StrictHostKeyChecking no`, `UserKnownHostsFile /dev/null`. Per-host blocks (`Host github.com`) are deliberately NOT flagged — `ForwardAgent yes` under `Host trusted.internal.example` is a defensible setup. Default `warn`, `developer` / `founder` / `paranoid` escalate to `fail`. Option names redacted under `--redact`.
+- **`browser.remote_debugging`** (Section 9, `_check_browser_remote_debugging` helper) — detects the `--remote-debugging-port` (and `--inspect-brk` / `--inspect`) flag on Chromium browsers (Chrome / Brave / Edge / Chromium / Arc / Vivaldi / Opera) and Electron-based IDEs (VS Code / Cursor). With this flag, the browser exposes the Chrome DevTools Protocol on a TCP socket; anything that can reach that socket (including DNS-rebinding from a malicious page in another tab) can dump cookies, extract session tokens, intercept wallet popups, and execute JS in any open tab. Documented technique behind multiple 2024 crypto-drainer incidents. Three-tier emission: **`fail` if any matching process is currently running**; `warn` if found in `~/Library/LaunchAgents/*.plist` or shell rc files (persisted but not running); `pass` otherwise. `web3` / `paranoid` / `founder` escalate the persisted-warn to `fail`. Process / file names redacted under `--redact`.
+
+### Profile overrides (PR 8)
+
+- `developer | network.listening.all_interfaces | warn → fail`
+- `paranoid | network.listening.all_interfaces | warn → fail`
+- `founder | network.listening.all_interfaces | warn → fail`
+- `developer | ssh.config.risky_options | warn → fail`
+- `paranoid | ssh.config.risky_options | warn → fail`
+- `founder | ssh.config.risky_options | warn → fail`
+- `web3 | browser.remote_debugging | warn → fail`
+- `paranoid | browser.remote_debugging | warn → fail`
+- `founder | browser.remote_debugging | warn → fail`
+
+### Tests (PR 8)
+
+- New `tests/sections/04_listening_ports.bats` — 11 cases for `_check_listening_all_interfaces`: empty / lsof-unavailable / localhost-only / `0.0.0.0:PORT` / `*:PORT` / `[::]:PORT` / mixed (only wildcard flagged) / developer escalation / founder escalation / paranoid escalation / `--redact` process-name suppression with ports preserved.
+- New `tests/sections/11_ssh_risky_options.bats` — 16 cases for `_check_ssh_config_risky_options`: missing config / empty / each risky option in isolation at global scope / each under `Host *` / per-host scope (Host github.com — NOT flagged) / `Match all` scope (flagged) / `Match host` (not flagged) / all three combined / dedupe (global + Host * for same option counted once) / developer / founder / paranoid escalations / comment + blank-line tolerance / `--redact`.
+- New `tests/sections/09_browser_remote_debugging.bats` — 12 cases for `_check_browser_remote_debugging`: empty / Chrome running / Brave running / Cursor running / non-browser process (NOT flagged) / LaunchAgent persisted / shell rc persisted / running dominates persisted / `--redact` running / `--redact` persisted / web3 escalation / paranoid escalation.
+
+### ID registry (PR 8)
+
+Three new entries in `tests/fixtures/expected_ids.txt`:
+- `network.listening.all_interfaces`
+- `ssh.config.risky_options`
+- `browser.remote_debugging`
+
 ## [1.0.1] - 2026-05-14
 
 Patch release addressing post-v1.0.0 review findings. No new check IDs; correctness + redaction fixes only.

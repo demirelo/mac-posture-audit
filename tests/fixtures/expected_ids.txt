@@ -18,6 +18,7 @@ boot.secure.full
 browser.default
 browser.installed
 browser.profile_count
+browser.remote_debugging
 browser.version_currency
 cloud.icloud.desktop_documents_sync
 cred.aws.creds
@@ -66,6 +67,7 @@ login.touchid.sudo
 login.window.namepw
 messaging.telegram.advisory
 network.airdrop.discoverable
+network.listening.all_interfaces
 network.bluetooth.off
 network.dns.encrypted
 network.dns.nextdns
@@ -101,6 +103,7 @@ ssh.agent.1password
 ssh.authsock
 ssh.config.identityagent
 ssh.config.perms
+ssh.config.risky_options
 ssh.posture
 ssh.keys.encrypted
 ssh.keys.none

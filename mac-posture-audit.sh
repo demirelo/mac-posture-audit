@@ -219,6 +219,7 @@ PROFILE_OVERRIDES=(
   "web3|ide.cursor.workspace_trust|warn|fail"
   "web3|browser.version_currency|warn|fail"
   "web3|network.vpn.killswitch|warn|fail"
+  "web3|browser.remote_debugging|warn|fail"
   # paranoid — high-threat user; lock down everything.
   "paranoid|ext.wallet|warn|fail"
   "paranoid|supply.npm.ignorescripts|warn|fail"
@@ -243,6 +244,9 @@ PROFILE_OVERRIDES=(
   "paranoid|cred.docker.auth|warn|fail"
   "paranoid|supply.pip.extra_index_url|warn|fail"
   "paranoid|supply.uv.config|warn|fail"
+  "paranoid|network.listening.all_interfaces|warn|fail"
+  "paranoid|ssh.config.risky_options|warn|fail"
+  "paranoid|browser.remote_debugging|warn|fail"
   # developer — supply chain matters; wallet-warn keeps default semantic.
   # cred.shellrc.patterns is intentionally absent: it already emits as `fail`
   # for every profile (the patterns are high-confidence prefixed tokens —
@@ -254,6 +258,8 @@ PROFILE_OVERRIDES=(
   "developer|supply.scanner|warn|fail"
   "developer|supply.pip.extra_index_url|warn|fail"
   "developer|supply.uv.config|warn|fail"
+  "developer|network.listening.all_interfaces|warn|fail"
+  "developer|ssh.config.risky_options|warn|fail"
   # founder — union of developer + web3. Solo founders who ship their own
   # code AND custody crypto have both attack surfaces. The list mirrors
   # the developer and web3 entries above; if either of those changes,
@@ -275,6 +281,9 @@ PROFILE_OVERRIDES=(
   "founder|ide.cursor.workspace_trust|warn|fail"
   "founder|browser.version_currency|warn|fail"
   "founder|network.vpn.killswitch|warn|fail"
+  "founder|network.listening.all_interfaces|warn|fail"
+  "founder|ssh.config.risky_options|warn|fail"
+  "founder|browser.remote_debugging|warn|fail"
 )
 
 # Apply the profile severity table to a (status, id) pair. Returns the
@@ -856,6 +865,63 @@ section_04_firewall_sharing() {
     pass "Internet Sharing is off" "network.intsharing.off"
   fi
 
+  _check_listening_all_interfaces
+}
+
+_check_listening_all_interfaces() {
+  # network.listening.all_interfaces — flag TCP listeners bound to 0.0.0.0
+  # or the IPv4/IPv6 wildcard address. Localhost-only listeners
+  # (127.0.0.1, [::1]) are fine; interface-specific binds (192.168.x.x)
+  # are assumed intentional and skipped.
+  #
+  # Real-world failure mode: a developer runs `vite --host 0.0.0.0`,
+  # `python -m http.server`, or `next dev -H 0.0.0.0` for cross-device
+  # testing and forgets to stop it. Anything on the local network can
+  # reach the service. On a co-working space or coffee shop wifi that's
+  # the entire room.
+  #
+  # We parse `lsof -nP -iTCP -sTCP:LISTEN -F pcn`, which emits one line
+  # per field with a single-letter prefix: p<pid>, c<command>, n<name>.
+  # The accumulator pairs each n with the most recent p+c.
+  local LSOF_OUT rc=0
+  LSOF_OUT=$(lsof -nP -iTCP -sTCP:LISTEN -F pcn 2>/dev/null) || rc=$?
+  if [[ "$rc" -ne 0 && -z "$LSOF_OUT" ]]; then
+    skip "lsof unavailable; cannot check listening ports" "" "network.listening.all_interfaces"
+    return
+  fi
+  local hits=() line cmd="" pid="" name port
+  while IFS= read -r line; do
+    case "$line" in
+    p*) pid="${line#p}" ;;
+    c*) cmd="${line#c}" ;;
+    n*)
+      name="${line#n}"
+      case "$name" in
+      \*:* | 0.0.0.0:* | \[::\]:*)
+        port="${name##*:}"
+        hits+=("${cmd}:${port}")
+        ;;
+      esac
+      ;;
+    esac
+  done <<<"$LSOF_OUT"
+  : "$pid" # silence shellcheck about unused
+  if [[ ${#hits[@]} -eq 0 ]]; then
+    pass "No TCP listeners on all-interfaces (0.0.0.0 / *)" "network.listening.all_interfaces"
+    return
+  fi
+  if [[ "$REDACT" == "true" ]]; then
+    # Strip process names; keep ports only so a sysadmin reading a
+    # redacted report can still spot e.g. ":3000 :8080" and know
+    # something is listening on dev-server ports.
+    local ports=() h
+    for h in "${hits[@]}"; do
+      ports+=(":${h##*:}")
+    done
+    warn "${#hits[@]} TCP listener(s) on all-interfaces: ${ports[*]}" "Each is reachable from the local network. Localhost-bind (127.0.0.1) is preferred for dev servers. Stop them when not in use, or bind to a specific interface." "network.listening.all_interfaces"
+  else
+    warn "TCP listeners on all-interfaces: ${hits[*]}" "Each is reachable from the local network. Localhost-bind (127.0.0.1) is preferred — most dev servers (vite, next, python -m http.server) support --host 127.0.0.1 / --bind 127.0.0.1. Stop them when not in use, or bind to a specific interface." "network.listening.all_interfaces"
+  fi
 }
 
 section_05_airdrop_bluetooth() {
@@ -1734,6 +1800,86 @@ section_09_browsers() {
       pass "Multiple browser profiles in use: ${PROFILE_COUNT_BREAKDOWN[*]}" "browser.profile_count"
     fi
   fi
+
+  _check_browser_remote_debugging
+}
+
+_check_browser_remote_debugging() {
+  # browser.remote_debugging — flag the `--remote-debugging-port` flag
+  # being attached to any Chromium browser or Electron app. With this
+  # flag the browser exposes the Chrome DevTools Protocol on a TCP
+  # socket; anything that can connect to that socket (including
+  # localhost-bound services on a shared dev box, or a malicious page in
+  # another tab via DNS-rebinding) can dump cookies, extract session
+  # tokens, intercept wallet popups, and execute JS in any open tab.
+  # This is the documented technique behind multiple 2024 crypto-drainer
+  # incidents.
+  #
+  # We surface three signals:
+  #   1. A running process with the flag (FAIL — actively exposed).
+  #   2. The flag in a user LaunchAgent (WARN — exposed at next login).
+  #   3. The flag in a shell rc or VS Code / Cursor command-line config
+  #      (WARN — exposed whenever the user starts the browser/IDE that way).
+  local BROWSER_PROC_PATTERN='(Google Chrome|Brave Browser|Microsoft Edge|Chromium|Arc|Vivaldi|Opera|Visual Studio Code|Cursor|Electron)'
+  local PS_OUT="" running_hits=() line
+  if command -v ps >/dev/null 2>&1; then
+    PS_OUT=$(ps -axwwo command= 2>/dev/null || true)
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      case "$line" in
+      *--remote-debugging-port=* | *--remote-debugging-pipe* | *--inspect-brk=* | *--inspect=*)
+        if echo "$line" | grep -qE "$BROWSER_PROC_PATTERN"; then
+          # Extract just the leading binary name for the report
+          local app
+          app=$(echo "$line" | grep -oE "$BROWSER_PROC_PATTERN" | head -1)
+          [[ -n "$app" ]] && running_hits+=("$app")
+        fi
+        ;;
+      esac
+    done <<<"$PS_OUT"
+  fi
+  # Dedupe running hits.
+  local seen_run="" item dedup_run=()
+  for item in ${running_hits[@]+"${running_hits[@]}"}; do
+    case " $seen_run " in
+    *" $item "*) ;;
+    *)
+      seen_run="$seen_run $item"
+      dedup_run+=("$item")
+      ;;
+    esac
+  done
+  # Persisted: grep LaunchAgents and shell rc files.
+  local persisted_hits=() f
+  for f in "$HOME"/Library/LaunchAgents/*.plist; do
+    [[ -f "$f" ]] || continue
+    if grep -qE -- '--remote-debugging-port' "$f" 2>/dev/null; then
+      persisted_hits+=("$(basename "$f")")
+    fi
+  done
+  for f in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.zprofile" "$HOME/.profile" "$HOME/.bash_profile"; do
+    [[ -f "$f" ]] || continue
+    if grep -qE -- '--remote-debugging-port' "$f" 2>/dev/null; then
+      persisted_hits+=("$(basename "$f")")
+    fi
+  done
+  if [[ ${#dedup_run[@]} -gt 0 ]]; then
+    if [[ "$REDACT" == "true" ]]; then
+      fail "${#dedup_run[@]} browser/Electron process(es) running with --remote-debugging-port" "Anyone who can connect to the debug socket can dump cookies, extract session tokens, intercept wallet popups, and execute JS in any tab. Quit the process and relaunch without the flag. If you need it for development, bind to a non-default port and run only in a throwaway profile." "browser.remote_debugging"
+    else
+      fail "Browser/Electron with --remote-debugging-port: ${dedup_run[*]}" "Anyone who can connect to the debug socket can dump cookies, extract session tokens, intercept wallet popups, and execute JS in any tab. Quit the process and relaunch without the flag. If you need it for development, bind to a non-default port and run only in a throwaway profile." "browser.remote_debugging"
+    fi
+    return
+  fi
+  if [[ ${#persisted_hits[@]} -gt 0 ]]; then
+    if [[ "$REDACT" == "true" ]]; then
+      warn "${#persisted_hits[@]} config file(s) reference --remote-debugging-port" "Not currently running, but launching the configured browser/script will reopen the debug surface. Review the LaunchAgent or shell rc and remove the flag." "browser.remote_debugging"
+    else
+      warn "--remote-debugging-port referenced in: ${persisted_hits[*]}" "Not currently running, but launching the configured browser/script will reopen the debug surface. Review the LaunchAgent or shell rc and remove the flag." "browser.remote_debugging"
+    fi
+    return
+  fi
+  pass "No browsers running or configured with --remote-debugging-port" "browser.remote_debugging"
 }
 
 section_10_browser_extensions() {
@@ -1924,6 +2070,91 @@ section_10_browser_extensions() {
 
 }
 
+_check_ssh_config_risky_options() {
+  # ssh.config.risky_options — flag dangerous patterns in ~/.ssh/config
+  # that apply globally (top-level scope before any `Host` block) or to
+  # `Host *` (wildcard matches every host).
+  #
+  # Patterns we flag:
+  #   - ForwardAgent yes        : exposes the local 1Password / ssh-agent
+  #                               socket to every server you SSH into. A
+  #                               compromised destination steals all keys.
+  #   - StrictHostKeyChecking no: accepts any host key on first connect;
+  #                               defeats MITM detection.
+  #   - UserKnownHostsFile /dev/null : same as above, plus discards the
+  #                                    record so subsequent MITMs aren't
+  #                                    flagged either.
+  #
+  # Scope-aware parsing: we walk the file line-by-line and track whether
+  # we're currently inside `Host *` / `Match all` / global (pre-Host)
+  # scope. Per-host blocks (`Host github.com`) are intentionally NOT
+  # flagged — `ForwardAgent yes` under `Host trusted.internal.example`
+  # is a defensible setup.
+  local cfg="$HOME/.ssh/config"
+  if [[ ! -f "$cfg" ]]; then
+    skip "~/.ssh/config not present" "" "ssh.config.risky_options"
+    return
+  fi
+  local in_global_scope=true line stripped host_pattern issues=()
+  while IFS= read -r line; do
+    # Strip leading whitespace + trailing comment for matching only.
+    stripped="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$stripped" || "$stripped" == \#* ]] && continue
+    # Section break: a `Host` or `Match` line starts a new scope.
+    if [[ "$stripped" =~ ^[Hh]ost[[:space:]]+(.*)$ ]]; then
+      host_pattern="${BASH_REMATCH[1]}"
+      # Whether the new section applies broadly:
+      #   "Host *" or "Host * !ignored.tld" etc.
+      case "$host_pattern" in
+      \** | *\ \** | *\ \*) in_global_scope=true ;;
+      *) in_global_scope=false ;;
+      esac
+      continue
+    fi
+    if [[ "$stripped" =~ ^[Mm]atch[[:space:]]+all([[:space:]]|$) ]]; then
+      in_global_scope=true
+      continue
+    fi
+    if [[ "$stripped" =~ ^[Mm]atch[[:space:]]+ ]]; then
+      in_global_scope=false
+      continue
+    fi
+    $in_global_scope || continue
+    # Inside global / Host * / Match all scope — check for risky options.
+    case "$stripped" in
+    [Ff]orward[Aa]gent[[:space:]]*[Yy][Ee][Ss]*)
+      issues+=("ForwardAgent yes")
+      ;;
+    [Ss]trict[Hh]ost[Kk]ey[Cc]hecking[[:space:]]*[Nn][Oo]*)
+      issues+=("StrictHostKeyChecking no")
+      ;;
+    *[Uu]ser[Kk]nown[Hh]osts[Ff]ile[[:space:]]*/dev/null*)
+      issues+=("UserKnownHostsFile /dev/null")
+      ;;
+    esac
+  done <"$cfg"
+  if [[ ${#issues[@]} -eq 0 ]]; then
+    pass "~/.ssh/config has no risky global / Host * options" "ssh.config.risky_options"
+    return
+  fi
+  # Dedupe (a setting might appear in both global and Host *).
+  local seen="" issue dedup=()
+  for issue in "${issues[@]}"; do
+    case " $seen " in
+    *" $issue "*) ;;
+    *)
+      seen="$seen $issue"
+      dedup+=("$issue")
+      ;;
+    esac
+  done
+  if [[ "$REDACT" == "true" ]]; then
+    warn "${#dedup[@]} risky option(s) in global / Host * scope of ~/.ssh/config" "Each applies to every host you SSH into. ForwardAgent yes exposes your 1Password/ssh-agent socket to compromise on any destination; StrictHostKeyChecking no defeats MITM detection; UserKnownHostsFile /dev/null discards the record so subsequent MITMs aren't flagged either. Move these into per-host blocks if you actually need them." "ssh.config.risky_options"
+  else
+    warn "Risky options in global / Host * scope of ~/.ssh/config: ${dedup[*]}" "Each applies to every host you SSH into. ForwardAgent yes exposes your 1Password/ssh-agent socket to compromise on any destination; StrictHostKeyChecking no defeats MITM detection; UserKnownHostsFile /dev/null discards the record so subsequent MITMs aren't flagged either. Move these into per-host blocks if you actually need them." "ssh.config.risky_options"
+  fi
+}
+
 section_11_ssh() {
   # ═════════════════════════════════════════════════════════════════════════════
   # 11 · SSH Keys & Agent
@@ -2043,6 +2274,8 @@ section_11_ssh() {
       warn "~/.ssh/config permissions: $PERMS" "Run: chmod 600 ~/.ssh/config" "ssh.config.perms"
     fi
   fi
+
+  _check_ssh_config_risky_options
 
   # Composite: SSH key risk surface.
   # Unencrypted private keys on disk are a liability; an external agent
