@@ -516,10 +516,18 @@ setup_app_roots_sandbox() {
   # would also strip access to sort/tr/etc that other section_22
   # checks need; the helper itself only does `command -v sfltool`
   # plus the emit, so a tiny PATH is safe here.
+  #
+  # We save/restore $PATH because bats' per-test teardown runs `rm` to
+  # clean up $BATS_TEST_TMPDIR after the test body returns; leaving the
+  # restricted PATH in place causes "rm: command not found" and bubbles
+  # up as an exit-1 from the bats runner even when every assertion
+  # passed.
   empty_bin="$BATS_TEST_TMPDIR/empty-bin"
   mkdir -p "$empty_bin"
+  orig_path="$PATH"
   PATH="$empty_bin"
   _check_persist_background_items
+  PATH="$orig_path"
   assert_recorded skip "sfltool not available (pre-Ventura macOS)"
 }
 

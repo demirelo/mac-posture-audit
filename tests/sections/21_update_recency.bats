@@ -31,12 +31,20 @@ EOF
   # Create the empty bin dir BEFORE nuking PATH (otherwise mkdir itself
   # becomes unavailable). After the override, `command -v softwareupdate`
   # finds nothing because the empty dir contains no executables.
+  #
+  # We save/restore $PATH because bats' per-test teardown runs `rm` to
+  # clean up $BATS_TEST_TMPDIR after the test body returns; leaving the
+  # restricted PATH in place causes "rm: command not found" and bubbles
+  # up as an exit-1 from the bats runner even when every assertion
+  # passed.
   empty_bin="$BATS_TEST_TMPDIR/empty-bin"
   mkdir -p "$empty_bin"
+  orig_path="$PATH"
   PATH="$empty_bin"
 
   _check_update_macos_recency
 
+  PATH="$orig_path"
   assert_recorded skip "softwareupdate not available"
 }
 
