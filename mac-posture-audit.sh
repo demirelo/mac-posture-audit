@@ -30,7 +30,7 @@
 # shellcheck disable=SC2088
 set -uo pipefail
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 
 # ── State ───────────────────────────────────────────────────────────────────
 PASS_N=0
@@ -945,15 +945,25 @@ _check_wifi_known_networks() {
     skip "Wi-Fi known networks plist not readable (try with sudo)" "Rerun with sudo to enumerate. The list is at $found_plist and grows with every joined network." "network.wifi.known_networks"
     return
   fi
-  # SSIDs appear as either SSIDString (older format) or as top-level keys
-  # in known-networks.plist (newer). Count either signal; whichever is
-  # present in this plist version.
+  # SSIDs appear as either modern top-level keys (Big Sur+) or older
+  # nested SSIDString / SSID_STR fields. Some plists contain BOTH (modern
+  # format with a legacy compatibility section), so a single grep across
+  # all patterns would double-count. Probe modern format first; only
+  # fall back to legacy if zero modern matches.
+  #
   # grep -c exits 1 when there are zero matches but still prints "0", so
   # any `|| echo 0` fallback produces a two-line result that breaks the
   # subsequent [[ -eq 0 ]] comparison. Swallow the exit with `|| true`.
-  local ssid_count
-  ssid_count=$(printf '%s' "$dump" | grep -cE '"SSIDString" =>|"SSID_STR" =>|"wifi.network.ssid.[^"]+"|"network_ssid" =>' 2>/dev/null || true)
-  ssid_count=${ssid_count:-0}
+  local ssid_count modern_count legacy_count
+  modern_count=$(printf '%s' "$dump" | grep -cE '"wifi.network.ssid.[^"]+"|"network_ssid" =>' 2>/dev/null || true)
+  modern_count=${modern_count:-0}
+  if [[ "$modern_count" -gt 0 ]]; then
+    ssid_count="$modern_count"
+  else
+    legacy_count=$(printf '%s' "$dump" | grep -cE '"SSIDString" =>|"SSID_STR" =>' 2>/dev/null || true)
+    legacy_count=${legacy_count:-0}
+    ssid_count="$legacy_count"
+  fi
   if [[ "$ssid_count" -eq 0 ]]; then
     skip "Wi-Fi known networks: count not parsable from this plist format" "Plist found but SSID extraction yielded zero matches. Format may have changed; consider opening an issue with 'plutil -p $found_plist | head' (redact sensitive SSIDs)." "network.wifi.known_networks"
   elif [[ "$ssid_count" -le 30 ]]; then
@@ -1031,7 +1041,11 @@ _check_vpn_killswitch() {
       skip "VPN(s) detected; verify killswitch manually: ${VPN_KS_REPORT[*]}" "Killswitch state is not readable from the CLI for some brands. ProtonVPN: Preferences → Connection → Kill Switch. NordVPN: Preferences → Kill Switch." "network.vpn.killswitch"
     fi
   else
-    pass "VPN killswitch is ON (verified: ${VPN_KS_REPORT[*]})" "network.vpn.killswitch"
+    if [[ "$REDACT" == "true" ]]; then
+      pass "VPN killswitch is ON (verified for ${#VPN_KS_REPORT[@]} brand)" "network.vpn.killswitch"
+    else
+      pass "VPN killswitch is ON (verified: ${VPN_KS_REPORT[*]})" "network.vpn.killswitch"
+    fi
   fi
 }
 
@@ -2830,7 +2844,11 @@ section_17_folder_layout() {
     fi
   done
   if [[ ${#SSH_EXPOSURE_FOUND[@]} -gt 0 ]]; then
-    fail "SSH / credential dirs inside cloud sync: ${SSH_EXPOSURE_FOUND[*]}" "Move these out of the synced folder immediately. SSH keys / AWS creds / kube tokens inside iCloud Drive / Dropbox / etc. are recoverable by anyone with cloud-account access — defeats FileVault at rest." "data.ssh.cloud_sync_exposure"
+    if [[ "$REDACT" == "true" ]]; then
+      fail "${#SSH_EXPOSURE_FOUND[@]} SSH / credential dir(s) inside cloud sync" "Move these out of the synced folder immediately. SSH keys / AWS creds / kube tokens inside iCloud Drive / Dropbox / etc. are recoverable by anyone with cloud-account access — defeats FileVault at rest." "data.ssh.cloud_sync_exposure"
+    else
+      fail "SSH / credential dirs inside cloud sync: ${SSH_EXPOSURE_FOUND[*]}" "Move these out of the synced folder immediately. SSH keys / AWS creds / kube tokens inside iCloud Drive / Dropbox / etc. are recoverable by anyone with cloud-account access — defeats FileVault at rest." "data.ssh.cloud_sync_exposure"
+    fi
   else
     pass "No SSH / credential dirs inside cloud sync" "data.ssh.cloud_sync_exposure"
   fi
@@ -2857,7 +2875,11 @@ section_17_folder_layout() {
     fi
   done
   if [[ ${#CRYPTO_EXPOSURE_FOUND[@]} -gt 0 ]]; then
-    warn "Wallet app data inside cloud sync: ${CRYPTO_EXPOSURE_FOUND[*]}" "Wallet metadata + (for some wallets) encrypted seed material lives in these dirs. Move them out of cloud sync." "data.crypto.cloud_sync_exposure"
+    if [[ "$REDACT" == "true" ]]; then
+      warn "${#CRYPTO_EXPOSURE_FOUND[@]} wallet app data dir(s) inside cloud sync" "Wallet metadata + (for some wallets) encrypted seed material lives in these dirs. Move them out of cloud sync." "data.crypto.cloud_sync_exposure"
+    else
+      warn "Wallet app data inside cloud sync: ${CRYPTO_EXPOSURE_FOUND[*]}" "Wallet metadata + (for some wallets) encrypted seed material lives in these dirs. Move them out of cloud sync." "data.crypto.cloud_sync_exposure"
+    fi
   else
     pass "No wallet app data inside cloud sync" "data.crypto.cloud_sync_exposure"
   fi
@@ -2888,7 +2910,11 @@ section_17_folder_layout() {
     fi
   done
   if [[ ${#DOTFILES_EXPOSURE_FOUND[@]} -gt 0 ]]; then
-    warn "Dotfiles inside cloud sync: ${DOTFILES_EXPOSURE_FOUND[*]}" "Shell rc / npmrc / gitconfig etc. inside cloud sync exposes credentials and config to anyone with cloud-account access. Move them out." "data.dotfiles.cloud_sync_exposure"
+    if [[ "$REDACT" == "true" ]]; then
+      warn "${#DOTFILES_EXPOSURE_FOUND[@]} dotfile(s) inside cloud sync" "Shell rc / npmrc / gitconfig etc. inside cloud sync exposes credentials and config to anyone with cloud-account access. Move them out." "data.dotfiles.cloud_sync_exposure"
+    else
+      warn "Dotfiles inside cloud sync: ${DOTFILES_EXPOSURE_FOUND[*]}" "Shell rc / npmrc / gitconfig etc. inside cloud sync exposes credentials and config to anyone with cloud-account access. Move them out." "data.dotfiles.cloud_sync_exposure"
+    fi
   else
     pass "No tracked dotfiles inside cloud sync" "data.dotfiles.cloud_sync_exposure"
   fi
@@ -2955,15 +2981,36 @@ section_18_backups() {
   # Sonoma+ (and earlier for some configurations). Value is "1"/"0" or
   # "Yes"/"No" depending on macOS version. An unencrypted TM drive is a
   # full-disk image readable by anyone who steals it — defeats FileVault
-  # at rest. Hard signal worth surfacing separately from destination presence.
+  # at rest.
+  #
+  # Mixed-destinations handling: a user with two TM disks (one encrypted,
+  # one not) needs to see the unencrypted one as a finding, not the
+  # encrypted one as a pass. We count both states and let "any
+  # unencrypted" dominate "any encrypted." Only emit pass when at least
+  # one destination is explicitly encrypted AND none are explicitly
+  # unencrypted.
   if echo "$TM_DEST" | grep -qiE "no destinations|No backup destinations"; then
     skip "Time Machine has no destination configured" "Once a destination is added, ensure 'Encrypt backup' is on." "backup.tm.encrypted"
-  elif echo "$TM_DEST" | grep -qiE "Encrypted *: *(1|Yes)"; then
-    pass "Time Machine destination is encrypted" "backup.tm.encrypted"
-  elif echo "$TM_DEST" | grep -qiE "Encrypted *: *(0|No)"; then
-    warn "Time Machine destination is unencrypted" "An unencrypted TM drive is a full-disk image readable by anyone who steals it — defeats FileVault. System Settings → General → Time Machine → select disk → 'Encrypt Backup'." "backup.tm.encrypted"
   else
-    skip "Time Machine encryption status not exposed by this tmutil version" "Verify manually: System Settings → General → Time Machine → backup disk → 'Encrypt backup' should be on." "backup.tm.encrypted"
+    TM_ENC_YES=$(echo "$TM_DEST" | grep -ciE "Encrypted *: *(1|Yes)" || true)
+    TM_ENC_NO=$(echo "$TM_DEST" | grep -ciE "Encrypted *: *(0|No)" || true)
+    TM_ENC_YES=${TM_ENC_YES:-0}
+    TM_ENC_NO=${TM_ENC_NO:-0}
+    if [[ "$TM_ENC_NO" -gt 0 ]]; then
+      if [[ "$TM_ENC_YES" -gt 0 ]]; then
+        warn "Time Machine: mixed destinations — $TM_ENC_NO unencrypted, $TM_ENC_YES encrypted" "An unencrypted TM disk is a full-disk image readable by anyone who steals it — defeats FileVault even though another destination is encrypted. System Settings → General → Time Machine → select the unencrypted disk → 'Encrypt Backup'." "backup.tm.encrypted"
+      else
+        warn "Time Machine destination is unencrypted" "An unencrypted TM drive is a full-disk image readable by anyone who steals it — defeats FileVault. System Settings → General → Time Machine → select disk → 'Encrypt Backup'." "backup.tm.encrypted"
+      fi
+    elif [[ "$TM_ENC_YES" -gt 0 ]]; then
+      if [[ "$TM_ENC_YES" -gt 1 ]]; then
+        pass "All $TM_ENC_YES Time Machine destinations are encrypted" "backup.tm.encrypted"
+      else
+        pass "Time Machine destination is encrypted" "backup.tm.encrypted"
+      fi
+    else
+      skip "Time Machine encryption status not exposed by this tmutil version" "Verify manually: System Settings → General → Time Machine → backup disk → 'Encrypt backup' should be on." "backup.tm.encrypted"
+    fi
   fi
 
   # Offsite backup tools

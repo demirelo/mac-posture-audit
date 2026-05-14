@@ -116,3 +116,41 @@ exit 1'
 
   assert_recorded fail "Time Machine destination is unencrypted"
 }
+
+@test "Time Machine encryption — mixed destinations (one encrypted, one not) warns" {
+  # Regression for the v1.0.0 bug where the encryption check was an
+  # ordered grep: any 'Encrypted: 1' anywhere in the output would emit
+  # PASS even if another destination was explicitly unencrypted. The
+  # fix counts both states and lets 'any unencrypted' dominate.
+  load_script
+  mock_cli_script tmutil '#!/usr/bin/env bash
+case "$1" in
+  destinationinfo) cat "$FIXTURE_ROOT/tmutil/destinations_mixed.txt" ;;
+  latestbackup) cat "$FIXTURE_ROOT/tmutil/no_latest.txt" ;;
+  *) exit 1 ;;
+esac'
+  mock_cli_script defaults '#!/usr/bin/env bash
+exit 1'
+
+  section_18_backups
+
+  assert_recorded warn "Time Machine: mixed destinations"
+  [[ "${RESULTS_WARN[*]}" == *"1 unencrypted"* ]]
+  [[ "${RESULTS_WARN[*]}" == *"1 encrypted"* ]]
+}
+
+@test "Time Machine encryption — two encrypted destinations both detected" {
+  load_script
+  mock_cli_script tmutil '#!/usr/bin/env bash
+case "$1" in
+  destinationinfo) cat "$FIXTURE_ROOT/tmutil/destinations_both_encrypted.txt" ;;
+  latestbackup) cat "$FIXTURE_ROOT/tmutil/no_latest.txt" ;;
+  *) exit 1 ;;
+esac'
+  mock_cli_script defaults '#!/usr/bin/env bash
+exit 1'
+
+  section_18_backups
+
+  assert_recorded pass "All 2 Time Machine destinations are encrypted"
+}

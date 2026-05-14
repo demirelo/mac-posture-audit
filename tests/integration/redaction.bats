@@ -94,3 +94,60 @@ run_redacted() {
     [[ "$wallet_row" != *'Wallet extension(s) installed: '* ]]
   fi
 }
+
+@test "--redact does not embed VPN brand in network.vpn.killswitch" {
+  run_redacted
+  ks_row=$(grep -o '{[^}]*"network\.vpn\.killswitch"[^}]*}' "$OUT" || true)
+  if [[ -n "$ks_row" ]]; then
+    # Brand tokens that could appear in the verified or advisory lists.
+    [[ "$ks_row" != *"mullvad:on"* ]]
+    [[ "$ks_row" != *"mullvad:off"* ]]
+    [[ "$ks_row" != *"mullvad:advisory"* ]]
+    [[ "$ks_row" != *"mullvad:unknown"* ]]
+    [[ "$ks_row" != *"protonvpn:advisory"* ]]
+    [[ "$ks_row" != *"nordvpn:advisory"* ]]
+    [[ "$ks_row" != *"verified: "* ]]
+    [[ "$ks_row" != *"manually: "* ]]
+  fi
+}
+
+@test "--redact does not embed SSH/cred dir names or cloud-provider names" {
+  run_redacted
+  exposure_row=$(grep -o '{[^}]*"data\.ssh\.cloud_sync_exposure"[^}]*}' "$OUT" || true)
+  if [[ -n "$exposure_row" ]]; then
+    # Tokens that would leak the specific dir → provider mapping.
+    [[ "$exposure_row" != *".ssh →"* ]]
+    [[ "$exposure_row" != *".aws →"* ]]
+    [[ "$exposure_row" != *".kube →"* ]]
+    [[ "$exposure_row" != *".gnupg →"* ]]
+    [[ "$exposure_row" != *"iCloud Drive"* ]]
+    [[ "$exposure_row" != *"Dropbox"* ]]
+    [[ "$exposure_row" != *"Google Drive"* ]]
+    [[ "$exposure_row" != *"OneDrive"* ]]
+  fi
+}
+
+@test "--redact does not embed wallet app names in data.crypto.cloud_sync_exposure" {
+  run_redacted
+  crypto_row=$(grep -o '{[^}]*"data\.crypto\.cloud_sync_exposure"[^}]*}' "$OUT" || true)
+  if [[ -n "$crypto_row" ]]; then
+    [[ "$crypto_row" != *"Ledger Live →"* ]]
+    [[ "$crypto_row" != *"Trezor Suite →"* ]]
+    [[ "$crypto_row" != *"Electrum →"* ]]
+    [[ "$crypto_row" != *"Sparrow →"* ]]
+    [[ "$crypto_row" != *"Bitcoin →"* ]]
+    [[ "$crypto_row" != *"Ethereum →"* ]]
+  fi
+}
+
+@test "--redact does not embed dotfile names in data.dotfiles.cloud_sync_exposure" {
+  run_redacted
+  dot_row=$(grep -o '{[^}]*"data\.dotfiles\.cloud_sync_exposure"[^}]*}' "$OUT" || true)
+  if [[ -n "$dot_row" ]]; then
+    [[ "$dot_row" != *".zshrc →"* ]]
+    [[ "$dot_row" != *".bashrc →"* ]]
+    [[ "$dot_row" != *".gitconfig →"* ]]
+    [[ "$dot_row" != *".netrc →"* ]]
+    [[ "$dot_row" != *".npmrc →"* ]]
+  fi
+}

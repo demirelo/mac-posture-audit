@@ -235,15 +235,14 @@ The Bats suite sources `mac-posture-audit.sh` as a library and uses fixtures/moc
 
 ## Compatibility
 
-| Platform | Support |
+Tested vs. supported are tracked separately. "Tested" means an actual run against the listed environment; "supported" means the script should work and degrade to `skip` for any version-specific check that isn't applicable.
+
+| Type | Environment |
 |---|---|
-| macOS Tahoe (26) | ✅ primary target, CI runner |
-| macOS Sequoia (15) | ✅ primary target |
-| macOS Sonoma (14) | ⚠️ should work — CI does not currently run against Sonoma |
-| macOS Ventura (13) | ⚠️ should work — some checks may use Sequoia-specific output formats (e.g. `sysadminctl -screenLock`) and degrade to SKIP |
-| Earlier macOS | ⚠️ some checks fall back to legacy `defaults read`; not actively supported |
-| Apple Silicon | ✅ |
-| Intel Mac | ✅ (Apple-Silicon-specific boot security checks become n/a) |
+| Manual full run | macOS 26.4.1 (Tahoe), arm64, Bash 3.2.57 |
+| CI | GitHub Actions `macos-latest` — a floating tag that resolves to the current latest macOS image. The exact `sw_vers` / `uname -m` / `/bin/bash --version` for every release is printed in the CI logs (see the "Print runtime versions" step of the Safety workflow). |
+| Expected compatible | macOS Sequoia (15), Sonoma (14), Ventura (13). Older releases may have legacy `defaults` output formats that some checks skip on cleanly. |
+| Architecture | Apple Silicon (primary, manually tested); Intel Macs supported with Apple-Silicon-specific boot security checks becoming n/a. |
 
 ## What this isn't
 

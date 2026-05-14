@@ -20,6 +20,25 @@ jobs:
       - name: Install test tools
         run: brew install bats-core shellcheck shfmt
 
+      - name: Print runtime versions
+        # Every release log records the exact macOS image, architecture, and
+        # bash version the suite ran against. README "Compatibility" only
+        # claims floating macos-latest for CI; this step makes the
+        # resolved-at-build version auditable.
+        run: |
+          echo "=== sw_vers ==="
+          sw_vers || true
+          echo "=== uname ==="
+          uname -a || true
+          echo "=== /bin/bash --version ==="
+          /bin/bash --version | head -1 || true
+          echo "=== bats-core ==="
+          bats --version || true
+          echo "=== shellcheck ==="
+          shellcheck --version | head -2 || true
+          echo "=== shfmt ==="
+          shfmt --version || true
+
       - name: Bash syntax
         run: bash -n mac-posture-audit.sh
 

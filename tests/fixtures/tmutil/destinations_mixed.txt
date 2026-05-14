@@ -1,0 +1,11 @@
+Name          : EncryptedDisk
+Kind          : Local
+Mount Point   : /Volumes/EncryptedDisk
+ID            : aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+Encrypted     : 1
+
+Name          : LegacyDisk
+Kind          : Local
+Mount Point   : /Volumes/LegacyDisk
+ID            : 11111111-2222-3333-4444-555555555555
+Encrypted     : 0

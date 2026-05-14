@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.1] - 2026-05-14
+
+Patch release addressing post-v1.0.0 review findings. No new check IDs; correctness + redaction fixes only.
+
+### Fixed
+
+- **P1: `backup.tm.encrypted` false-PASS on mixed Time Machine destinations.** The encryption check was an ordered grep: any `Encrypted : 1` anywhere in `tmutil destinationinfo` output emitted `pass` even if another destination was explicitly unencrypted. A user with two TM disks (one encrypted, one not) would see a clean pass and miss the real exposure. The fix counts both states and lets "any unencrypted" dominate "any encrypted." New label for the mixed case: `Time Machine: mixed destinations — N unencrypted, M encrypted`. Two new fixtures (`destinations_mixed.txt`, `destinations_both_encrypted.txt`) + two regression tests.
+
+- **P2: `network.wifi.known_networks` double-count on plists with both formats.** The SSID counter was a single regex matching modern top-level keys (`wifi.network.ssid.*`) AND nested legacy fields (`SSIDString`, `SSID_STR`) in one pass. Plists that carry both (modern format with legacy-compat section) had every network counted twice — 20 real SSIDs became 40, tipping the user from `pass` (≤30) into `warn` (≥31) artificially. The fix probes modern format first and only falls back to legacy if zero modern matches. Two new regression tests cover the mixed-format and legacy-only cases.
+
+- **P2: Redaction leaks in v0.2–v1.0 rows.** Four new rows didn't have `REDACT` branches and leaked identifying values into `--redact` JSON output:
+  - `network.vpn.killswitch` pass label included `mullvad:on` (brand identifier).
+  - `data.ssh.cloud_sync_exposure` fail label listed `.ssh → iCloud Drive` (specific dir name + provider).
+  - `data.crypto.cloud_sync_exposure` warn label listed `Ledger Live → iCloud Drive` (wallet brand + provider).
+  - `data.dotfiles.cloud_sync_exposure` warn label listed `.zshrc → iCloud Drive` (dotfile name + provider).
+
+  All four now collapse to count-only labels under `--redact`. Five new assertions in `tests/integration/redaction.bats` (one per row plus a combined VPN-brands check) prevent regression — these would have caught the original leak before v1.0.0 shipped.
+
+- **P3: README compatibility claim corrected.** v1.0.0 README said "macOS Tahoe (26): primary target, CI runner." CI actually uses GitHub Actions `macos-latest`, which is a floating image tag. Reworded the compatibility table to separate "Tested" (manual run, with specific version) from "CI" (floating tag, with resolved-version printed in logs) from "Expected compatible" (older macOS releases).
+
+### Added
+
+- **CI: print resolved runtime versions on every build.** New "Print runtime versions" step in `.github/workflows/safety.yml` outputs `sw_vers`, `uname -a`, `/bin/bash --version`, `bats --version`, `shellcheck --version`, `shfmt --version`. Every release log now records exactly what "tested" meant for that build. Useful for chasing macOS-version-specific regressions later.
+
+### Backlog (v1.1.0 targets)
+
+Eight new check suggestions from the v1.0.0 review, deferred to v1.1.0 so the patch stays scoped to correctness fixes:
+
+1. `persist.background_items` — Background items via `sfltool dumpbtm` (modern macOS persistence surface; sfltool is read-only).
+2. `ssh.config.risky_options` — `ForwardAgent yes` / `StrictHostKeyChecking no` / `UserKnownHostsFile /dev/null` in `~/.ssh/config`.
+3. `browser.remote_debugging` — running browsers or LaunchAgents / shell-rc entries with `--remote-debugging-port` (cookie / wallet theft surface).
+4. `system.xprotect.fresh` — XProtect / XProtect Remediator bundle mtime freshness.
+5. `tcc.appleevents`, `tcc.camera_microphone` — extend the sensitive-services list in TCC parsing.
+6. `network.listening.all_interfaces` — `lsof -nP -iTCP -sTCP:LISTEN`, warn on `*:PORT` / `0.0.0.0` dev servers. Developer/founder profile only.
+7. `browser.password_autofill` — browser-native password manager / autofill posture by grepping Preferences.
+8. `network.wifi.auto_join_count` — complement `network.wifi.known_networks` with auto-join count.
+
 ## [1.0.0] - 2026-05-13
 
 First public release. The audit has been used in iteration on a real macOS Tahoe machine since v0.1.0 (initial release, 2026-05-10); v1.0.0 collapses the v0.5.0 milestone into the public cut. From this version forward, IDs and the JSON schema are a stability contract — see `docs/schema.md` for the versioning policy.

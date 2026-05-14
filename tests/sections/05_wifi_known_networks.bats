@@ -97,3 +97,59 @@ emit_ssid_entries() {
 
   assert_recorded warn "75 remembered"
 }
+
+@test "plist with both modern + legacy SSID keys — not double-counted" {
+  # Regression for the v1.0.0 bug where the SSID count regex matched
+  # both modern (wifi.network.ssid.*) and legacy (SSIDString) keys in
+  # one pass. A plist with 5 modern entries that also includes nested
+  # SSIDString compatibility fields would emit count=10, making 20
+  # real networks look like 40. The fix probes modern first and only
+  # falls back to legacy if the modern count is zero.
+  load_script
+  setup_wifi_sandbox
+  # 5 modern entries, each also carrying a nested SSIDString field.
+  cat >"${WIFI_KNOWN_PLISTS[0]}" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyLists-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>wifi.network.ssid.NET_1</key>
+  <dict><key>SSIDString</key><string>net_1</string></dict>
+  <key>wifi.network.ssid.NET_2</key>
+  <dict><key>SSIDString</key><string>net_2</string></dict>
+  <key>wifi.network.ssid.NET_3</key>
+  <dict><key>SSIDString</key><string>net_3</string></dict>
+  <key>wifi.network.ssid.NET_4</key>
+  <dict><key>SSIDString</key><string>net_4</string></dict>
+  <key>wifi.network.ssid.NET_5</key>
+  <dict><key>SSIDString</key><string>net_5</string></dict>
+</dict>
+</plist>
+XML
+
+  _check_wifi_known_networks
+
+  assert_recorded pass "Wi-Fi known networks: 5"
+  # The buggy regex would have produced 10; fail the test if we see it.
+  [[ "${RESULTS_PASS[*]}" != *"10 "* ]]
+}
+
+@test "plist with only legacy keys (no modern) — counted via fallback" {
+  load_script
+  setup_wifi_sandbox
+  cat >"${WIFI_KNOWN_PLISTS[0]}" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyLists-1.0.dtd">
+<plist version="1.0">
+<array>
+  <dict><key>SSIDString</key><string>legacy_1</string></dict>
+  <dict><key>SSIDString</key><string>legacy_2</string></dict>
+  <dict><key>SSIDString</key><string>legacy_3</string></dict>
+</array>
+</plist>
+XML
+
+  _check_wifi_known_networks
+
+  assert_recorded pass "Wi-Fi known networks: 3"
+}

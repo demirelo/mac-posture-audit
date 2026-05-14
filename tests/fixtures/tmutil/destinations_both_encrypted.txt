@@ -1,0 +1,11 @@
+Name          : DiskOne
+Kind          : Local
+Mount Point   : /Volumes/DiskOne
+ID            : aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+Encrypted     : 1
+
+Name          : DiskTwo
+Kind          : Local
+Mount Point   : /Volumes/DiskTwo
+ID            : 11111111-2222-3333-4444-555555555555
+Encrypted     : Yes
