@@ -239,7 +239,7 @@ Tested vs. supported are tracked separately. "Tested" means an actual run agains
 
 | Type | Environment |
 |---|---|
-| Manual full run | macOS 26.4.1 (Tahoe), arm64, Bash 3.2.57 |
+| Manual full run | macOS 26.5 (Tahoe), arm64, Bash 3.2.57 |
 | CI | GitHub Actions `macos-latest` — a floating tag that resolves to the current latest macOS image. The exact `sw_vers` / `uname -m` / `/bin/bash --version` for every release is printed in the CI logs (see the "Print runtime versions" step of the Safety workflow). |
 | Expected compatible | macOS Sequoia (15), Sonoma (14), Ventura (13). Older releases may have legacy `defaults` output formats that some checks skip on cleanly. |
 | Architecture | Apple Silicon (primary, manually tested); Intel Macs supported with Apple-Silicon-specific boot security checks becoming n/a. |
