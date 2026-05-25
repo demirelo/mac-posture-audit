@@ -30,7 +30,7 @@
 # shellcheck disable=SC2088
 set -uo pipefail
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 
 # ── State ───────────────────────────────────────────────────────────────────
 PASS_N=0
@@ -40,6 +40,13 @@ SKIP_N=0
 declare -a RESULTS_PASS RESULTS_WARN RESULTS_FAIL RESULTS_SKIP
 declare -a JSON_ROWS
 
+# ── Exposure catalog state ──────────────────────────────────────────────────
+# Parallel arrays — bash 3.2 has no associative arrays. Populated by
+# load_exposure_catalog when --exposure-catalog is passed.
+EXPOSURE_CATALOG_PATH=""
+CATALOG_LOADED=false
+declare -a CATALOG_CATEGORIES CATALOG_NAMES CATALOG_SEVERITIES CATALOG_IDS
+
 # ── Args ────────────────────────────────────────────────────────────────────
 parse_args() {
   # MODE controls output format: "full" (terminal) or "json".
@@ -48,10 +55,14 @@ parse_args() {
   QUICK=false      # --quick: skip sudo-required checks
   NETWORK=false    # --network: allow external probes (default off)
   REDACT=false     # --redact: mask host/email/usernames/IPs/paths in output
-  PROFILE="normal" # --profile: severity calibration (normal|web3|paranoid|developer|founder)
-  DIFF_PATH=""     # --diff: compare current run against previous JSON
+  PROFILE="normal"           # --profile: severity calibration (normal|web3|paranoid|developer|founder)
+  DIFF_PATH=""               # --diff: compare current run against previous JSON
+  EXPOSURE_CATALOG_PATH=""   # --exposure-catalog: deny-list (line-based "category|name|severity[|id]")
+  SUMMARY_LINE=false         # --summary-line: emit a machine-parseable one-line summary at end of run
+  SELFTEST=false             # --selftest: run a minimal end-to-end smoke test against in-tree fixtures and exit
   expect_profile=false
   expect_diff=false
+  expect_catalog=false
   for arg in "$@"; do
     if $expect_profile; then
       case "$arg" in
@@ -73,12 +84,23 @@ parse_args() {
       expect_diff=false
       continue
     fi
+    if $expect_catalog; then
+      if [[ -z "$arg" ]]; then
+        echo "--exposure-catalog requires a path"
+        exit 2
+      fi
+      EXPOSURE_CATALOG_PATH="$arg"
+      expect_catalog=false
+      continue
+    fi
     case "$arg" in
     --quick) QUICK=true ;;
     --json) MODE="json" ;;
     --network) NETWORK=true ;;
     --offline) NETWORK=false ;;
     --redact) REDACT=true ;;
+    --summary-line) SUMMARY_LINE=true ;;
+    --selftest) SELFTEST=true ;;
     --profile) expect_profile=true ;;
     --profile=*)
       arg="${arg#--profile=}"
@@ -98,6 +120,14 @@ parse_args() {
         exit 2
       fi
       ;;
+    --exposure-catalog) expect_catalog=true ;;
+    --exposure-catalog=*)
+      EXPOSURE_CATALOG_PATH="${arg#--exposure-catalog=}"
+      if [[ -z "$EXPOSURE_CATALOG_PATH" ]]; then
+        echo "--exposure-catalog requires a path"
+        exit 2
+      fi
+      ;;
     --version)
       printf 'mac-posture-audit %s\n' "$SCRIPT_VERSION"
       exit 0
@@ -107,24 +137,41 @@ parse_args() {
       cat <<'USAGE'
 
 Flags (combinable):
-  --quick           Skip checks that require sudo
-  --json            Machine-readable JSON output
-  --network         Allow live external probes (e.g., test.nextdns.io). Default off.
-  --offline         Force no external calls (default).
-  --redact          Mask hostname, email addresses, admin usernames, resolver IPs,
-                    and $HOME paths in output. Use this when sharing the report.
-  --profile NAME    Severity profile. One of: normal (default), web3, paranoid,
-                    developer, founder. Escalates specific checks based on
-                    threat model (e.g. wallet-on-main-user is warn under
-                    normal, fail under web3 / paranoid). The 'founder'
-                    profile is the union of developer + web3 escalations
-                    for solo founders shipping their own code who also
-                    custody crypto.
-  --diff PATH       Compare current run against a previously saved
-                    --json output. Prints one line per id whose status
-                    differs. Implies --json (run is collected internally).
-  --version         Show version and exit.
-  --help            Show this help text and exit.
+  --quick                 Skip checks that require sudo
+  --json                  Machine-readable JSON output
+  --network               Allow live external probes (e.g., test.nextdns.io). Default off.
+  --offline               Force no external calls (default).
+  --redact                Mask hostname, email addresses, admin usernames, resolver IPs,
+                          and $HOME paths in output. Use this when sharing the report.
+  --profile NAME          Severity profile. One of: normal (default), web3, paranoid,
+                          developer, founder. Escalates specific checks based on
+                          threat model (e.g. wallet-on-main-user is warn under
+                          normal, fail under web3 / paranoid). The 'founder'
+                          profile is the union of developer + web3 escalations
+                          for solo founders shipping their own code who also
+                          custody crypto.
+  --diff PATH             Compare current run against a previously saved
+                          --json output. Prints one line per id whose status
+                          differs. Implies --json (run is collected internally).
+  --exposure-catalog PATH Load a deny-list of known-bad browser extension IDs,
+                          editor extensions (publisher.name), MCP server package
+                          names, app bundle IDs, and brew formulae. Format is
+                          one entry per line: category|name|severity[|id].
+                          Categories: browser_extension_id, editor_extension,
+                          mcp_server, mcp_package, app_bundle_id, brew_formula.
+                          Severity: info (skip), warn, critical (fail).
+                          Lines starting with # are comments. Matched entries
+                          surface in *.suspicious check rows. Read-only.
+  --summary-line          After the normal report (or at the end of JSON
+                          output), print one extra machine-parseable line:
+                          mac-posture-audit summary version=… profile=… …
+                          For shell scripts that just need pass/warn/fail counts.
+  --selftest              Run a minimal end-to-end smoke test (no real host
+                          state inspected, no disk writes) and exit. A
+                          non-zero exit means this build no longer detects
+                          what it should — pre-deploy MDM smoke check.
+  --version               Show version and exit.
+  --help                  Show this help text and exit.
 USAGE
       exit 0
       ;;
@@ -140,6 +187,10 @@ USAGE
   fi
   if $expect_diff; then
     echo "--diff requires a path to a previous JSON output"
+    exit 2
+  fi
+  if $expect_catalog; then
+    echo "--exposure-catalog requires a path"
     exit 2
   fi
 
@@ -288,6 +339,19 @@ PROFILE_OVERRIDES=(
   "founder|ssh.config.risky_options|warn|fail"
   "founder|browser.remote_debugging|warn|fail"
   "founder|browser.password_autofill|skip|warn"
+  # v1.2.0 — MCP audit escalations. Remote-HTTP and unpinned MCP servers
+  # are the practical attack surface here: a malicious or compromised
+  # upstream package or remote endpoint reaches into Claude Desktop /
+  # Cursor / Windsurf with full host access. For web3 / paranoid / founder
+  # the cost of a compromised MCP server (wallet seed extraction, code
+  # rewrite during refactors, credential exfiltration) is too high to
+  # leave as a warn.
+  "web3|mcp.servers.remote_http|warn|fail"
+  "web3|mcp.servers.unpinned|warn|fail"
+  "paranoid|mcp.servers.remote_http|warn|fail"
+  "paranoid|mcp.servers.unpinned|warn|fail"
+  "founder|mcp.servers.remote_http|warn|fail"
+  "founder|mcp.servers.unpinned|warn|fail"
 )
 
 # Apply the profile severity table to a (status, id) pair. Returns the
@@ -307,6 +371,86 @@ _apply_profile() {
     fi
   done
   printf '%s' "$status"
+}
+
+# ── Exposure catalog (deny-list) loader ─────────────────────────────────────
+# Format: one entry per line, fields pipe-separated:
+#   category|name|severity[|id]
+# Lines starting with # and blank lines are ignored.
+# Categories (typed; checks match against these):
+#   browser_extension_id   — Chromium/Firefox extension ID (32-char a-p for Chrome)
+#   editor_extension       — VS Code / Cursor / Windsurf publisher.name
+#   mcp_server             — MCP server id (the key in mcpServers JSON)
+#   mcp_package            — MCP launcher package name (npm/uvx/docker ref)
+#   app_bundle_id          — macOS application bundle identifier
+#   brew_formula           — homebrew formula or cask name (with optional tap)
+# Severity:
+#   info | warn | critical (mapped to skip / warn / fail when surfaced)
+#
+# The loader is single-pass, native (only `while read`), bash 3.2 safe, and
+# emits a single error to stderr if the catalog is unreadable. Validation is
+# intentionally lenient — unknown categories are simply ignored at match time
+# rather than rejected, so a forward-compatible catalog with a new category
+# does not break older scanners.
+load_exposure_catalog() {
+  [[ -z "${EXPOSURE_CATALOG_PATH:-}" ]] && return 0
+  if [[ ! -r "$EXPOSURE_CATALOG_PATH" ]]; then
+    printf 'mac-posture-audit: cannot read --exposure-catalog %s\n' "$EXPOSURE_CATALOG_PATH" >&2
+    exit 2
+  fi
+  local line category name severity id
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Strip surrounding whitespace.
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+    case "$line" in '#'*) continue ;; esac
+    # Parse pipe-separated fields.
+    IFS='|' read -r category name severity id <<<"$line"
+    [[ -z "$category" || -z "$name" || -z "$severity" ]] && continue
+    case "$severity" in
+    info | warn | critical) ;;
+    *) continue ;;
+    esac
+    CATALOG_CATEGORIES+=("$category")
+    CATALOG_NAMES+=("$name")
+    CATALOG_SEVERITIES+=("$severity")
+    CATALOG_IDS+=("${id:-}")
+  done <"$EXPOSURE_CATALOG_PATH"
+  CATALOG_LOADED=true
+}
+
+# _catalog_match CATEGORY VALUE
+#   Prints "severity|id" if (CATEGORY, VALUE) is present in the loaded
+#   catalog; empty otherwise. Match is case-insensitive on the name (extension
+#   IDs are case-stable but publisher.name values are sometimes recorded with
+#   inconsistent casing).
+_catalog_match() {
+  local category="$1" value="$2"
+  $CATALOG_LOADED || return 0
+  [[ -z "$category" || -z "$value" ]] && return 0
+  local i n="${#CATALOG_CATEGORIES[@]}"
+  local lc_value lc_name
+  # bash 3.2 lacks ${var,,} — fold manually with tr.
+  lc_value=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+  for ((i = 0; i < n; i++)); do
+    [[ "${CATALOG_CATEGORIES[$i]}" == "$category" ]] || continue
+    lc_name=$(printf '%s' "${CATALOG_NAMES[$i]}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$lc_name" == "$lc_value" ]]; then
+      printf '%s|%s' "${CATALOG_SEVERITIES[$i]}" "${CATALOG_IDS[$i]}"
+      return
+    fi
+  done
+}
+
+# _catalog_status_for SEVERITY — map info/warn/critical to skip/warn/fail.
+_catalog_status_for() {
+  case "$1" in
+  info) printf 'skip' ;;
+  warn) printf 'warn' ;;
+  critical) printf 'fail' ;;
+  *) printf 'skip' ;;
+  esac
 }
 
 # Escape a string for embedding inside a JSON string literal. Backslash must be
@@ -4360,6 +4504,474 @@ section_25_messaging() {
   fi
 }
 
+_check_browser_extensions_inventory() {
+  # browser.extensions.count + browser.extensions.suspicious
+  #
+  # Walks Chromium-family (Chrome / Brave / Edge / Arc / Vivaldi / Opera /
+  # Chromium) and Firefox-family (Firefox / LibreWolf / Waterfox) profile
+  # trees. For Chromium, identity is the 32-char extension ID at
+  # <root>/<profile>/Extensions/<ext_id>/<version>/manifest.json. For
+  # Firefox, identity comes from extensions.json addon entries with
+  # "type":"extension".
+  #
+  # Only the directory layout is opened. No manifest body parsing for
+  # name resolution beyond what _catalog_match needs (which is the ID).
+  # Browser cookies / login data / IndexedDB are never touched.
+  #
+  # Hermetic override: set BROWSER_EXT_CHROMIUM_ROOTS / BROWSER_EXT_FIREFOX_ROOTS
+  # to "<brand>|<root>" pipe-delimited entries.
+  local BROWSER_EXT_CHROMIUM_ROOTS_DEFAULT=(
+    "Brave|$HOME/Library/Application Support/BraveSoftware/Brave-Browser"
+    "Chrome|$HOME/Library/Application Support/Google/Chrome"
+    "Edge|$HOME/Library/Application Support/Microsoft Edge"
+    "Arc|$HOME/Library/Application Support/Arc/User Data"
+    "Vivaldi|$HOME/Library/Application Support/Vivaldi"
+    "Opera|$HOME/Library/Application Support/com.operasoftware.Opera"
+    "Chromium|$HOME/Library/Application Support/Chromium"
+  )
+  local BROWSER_EXT_FIREFOX_ROOTS_DEFAULT=(
+    "Firefox|$HOME/Library/Application Support/Firefox/Profiles"
+    "LibreWolf|$HOME/Library/Application Support/LibreWolf/Profiles"
+    "Waterfox|$HOME/Library/Application Support/Waterfox/Profiles"
+  )
+
+  local -a chromium_roots firefox_roots
+  if [[ -n "${BROWSER_EXT_CHROMIUM_ROOTS+set}" ]]; then
+    chromium_roots=(${BROWSER_EXT_CHROMIUM_ROOTS[@]+"${BROWSER_EXT_CHROMIUM_ROOTS[@]}"})
+  else
+    chromium_roots=("${BROWSER_EXT_CHROMIUM_ROOTS_DEFAULT[@]}")
+  fi
+  if [[ -n "${BROWSER_EXT_FIREFOX_ROOTS+set}" ]]; then
+    firefox_roots=(${BROWSER_EXT_FIREFOX_ROOTS[@]+"${BROWSER_EXT_FIREFOX_ROOTS[@]}"})
+  else
+    firefox_roots=("${BROWSER_EXT_FIREFOX_ROOTS_DEFAULT[@]}")
+  fi
+
+  local total=0 suspicious_count=0 fail_count=0
+  local -a suspicious_hits seen_ext
+  suspicious_hits=()
+  seen_ext=()
+
+  local row brand root profile_dir ext_dir version_dir manifest ext_id ver
+  local match severity match_id key_id
+  for row in ${chromium_roots[@]+"${chromium_roots[@]}"}; do
+    brand="${row%%|*}"
+    root="${row##*|}"
+    [[ -d "$root" ]] || continue
+    for profile_dir in "$root"/Default "$root"/Profile\ * "$root"/Guest\ Profile; do
+      [[ -d "$profile_dir/Extensions" ]] || continue
+      for ext_dir in "$profile_dir/Extensions"/*/; do
+        ext_id=$(basename "$ext_dir")
+        [[ "$ext_id" == "Extensions" || "$ext_id" == "Temp" ]] && continue
+        # Only count once per (brand, ext_id) pair — multi-profile installs
+        # otherwise inflate the count.
+        key_id="${brand}:${ext_id}"
+        if _arr_contains "$key_id" ${seen_ext[@]+"${seen_ext[@]}"}; then
+          continue
+        fi
+        # Require at least one version dir with manifest.json — guards against
+        # half-installed shells, _metadata, Temp, etc.
+        local has_manifest=false
+        for version_dir in "$ext_dir"*/; do
+          manifest="${version_dir}manifest.json"
+          [[ -f "$manifest" ]] || continue
+          has_manifest=true
+          ver=$(basename "$version_dir")
+          break
+        done
+        $has_manifest || continue
+        seen_ext+=("$key_id")
+        total=$((total + 1))
+        match=$(_catalog_match "browser_extension_id" "$ext_id")
+        if [[ -n "$match" ]]; then
+          severity="${match%%|*}"
+          match_id="${match##*|}"
+          suspicious_count=$((suspicious_count + 1))
+          [[ "$severity" == "critical" ]] && fail_count=$((fail_count + 1))
+          suspicious_hits+=("${brand}:${ext_id}|${severity}|${match_id}")
+        fi
+      done
+    done
+  done
+
+  local fx_brand fx_root ext_file addons addon
+  for row in ${firefox_roots[@]+"${firefox_roots[@]}"}; do
+    fx_brand="${row%%|*}"
+    fx_root="${row##*|}"
+    [[ -d "$fx_root" ]] || continue
+    for profile_dir in "$fx_root"/*; do
+      ext_file="$profile_dir/extensions.json"
+      [[ -f "$ext_file" ]] || continue
+      # Coarse single-line scan — extracts "id":"<addon>" only when paired
+      # with "type":"extension" within the same JSON object. Multi-line JSON
+      # objects are flattened first.
+      addons=$(tr -d '\n' <"$ext_file" 2>/dev/null | grep -oE '\{[^}]*"id"[[:space:]]*:[[:space:]]*"[^"]*"[^}]*"type"[[:space:]]*:[[:space:]]*"extension"[^}]*\}' 2>/dev/null | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sort -u || true)
+      while IFS= read -r addon; do
+        [[ -z "$addon" ]] && continue
+        key_id="${fx_brand}:${addon}"
+        if _arr_contains "$key_id" ${seen_ext[@]+"${seen_ext[@]}"}; then
+          continue
+        fi
+        seen_ext+=("$key_id")
+        total=$((total + 1))
+        match=$(_catalog_match "browser_extension_id" "$addon")
+        if [[ -n "$match" ]]; then
+          severity="${match%%|*}"
+          match_id="${match##*|}"
+          suspicious_count=$((suspicious_count + 1))
+          [[ "$severity" == "critical" ]] && fail_count=$((fail_count + 1))
+          suspicious_hits+=("${fx_brand}:${addon}|${severity}|${match_id}")
+        fi
+      done <<<"$addons"
+    done
+  done
+
+  if [[ "$total" -eq 0 ]]; then
+    skip "No browser extensions found across detected profiles" "" "browser.extensions.count"
+  else
+    skip "Browser extensions detected: $total installed (deduped by brand+id)" "Informational — see browser.extensions.suspicious for catalog-matched entries. Use --exposure-catalog to flag specific known-bad IDs (drainer / clipboard-hijack / ad-injector campaigns)." "browser.extensions.count"
+  fi
+
+  if ! $CATALOG_LOADED; then
+    skip "No exposure catalog loaded — supply --exposure-catalog to surface known-bad browser extension IDs" "" "browser.extensions.suspicious"
+    return
+  fi
+  if [[ "$suspicious_count" -eq 0 ]]; then
+    pass "No catalog-matched suspicious browser extensions installed" "browser.extensions.suspicious"
+    return
+  fi
+  local out="" entry sev_label
+  if [[ "$REDACT" != "true" ]]; then
+    for entry in "${suspicious_hits[@]}"; do
+      sev_label="${entry#*|}"
+      sev_label="${sev_label%|*}"
+      [[ -n "$out" ]] && out="$out, "
+      out="$out${entry%%|*} [$sev_label]"
+    done
+  fi
+  if [[ "$fail_count" -gt 0 ]]; then
+    if [[ "$REDACT" == "true" ]]; then
+      fail "$suspicious_count browser extension(s) match exposure catalog (critical: $fail_count)" "Open the browser's extensions page, remove the matching IDs, and rotate any session tokens / wallet seed phrases that may have been exposed." "browser.extensions.suspicious"
+    else
+      fail "Catalog-matched browser extensions: $out" "Open the browser's extensions page, remove these IDs, and rotate any session tokens / wallet seed phrases that may have been exposed." "browser.extensions.suspicious"
+    fi
+  else
+    if [[ "$REDACT" == "true" ]]; then
+      warn "$suspicious_count browser extension(s) match exposure catalog (informational)" "Review and remove the matching IDs if no longer trusted." "browser.extensions.suspicious"
+    else
+      warn "Catalog-matched browser extensions: $out" "Review the catalog-named extensions; remove if no longer trusted." "browser.extensions.suspicious"
+    fi
+  fi
+}
+
+_check_editor_extensions() {
+  # dev.editor_extensions.count + dev.editor_extensions.suspicious
+  #
+  # Walks known editor extension trees (VS Code, Cursor, Windsurf, VSCodium,
+  # plus their *-server remote-dev twins). Each subdirectory is named
+  # <publisher>.<name>-<version>[-<platform>], so the publisher.name pair
+  # falls out of a single sed.
+  #
+  # Hermetic override: EDITOR_EXT_ROOTS (pipe-delimited "<editor>|<root>").
+  local EDITOR_EXT_ROOTS_DEFAULT=(
+    "vscode|$HOME/.vscode/extensions"
+    "vscode-server|$HOME/.vscode-server/extensions"
+    "vscode-insiders|$HOME/.vscode-insiders/extensions"
+    "cursor|$HOME/.cursor/extensions"
+    "cursor-server|$HOME/.cursor-server/extensions"
+    "windsurf|$HOME/.windsurf/extensions"
+    "windsurf-server|$HOME/.windsurf-server/extensions"
+    "vscodium|$HOME/.vscodium/extensions"
+  )
+
+  local -a editor_roots
+  if [[ -n "${EDITOR_EXT_ROOTS+set}" ]]; then
+    editor_roots=(${EDITOR_EXT_ROOTS[@]+"${EDITOR_EXT_ROOTS[@]}"})
+  else
+    editor_roots=("${EDITOR_EXT_ROOTS_DEFAULT[@]}")
+  fi
+
+  local total=0 suspicious_count=0 fail_count=0
+  local -a suspicious_hits seen_ext
+  suspicious_hits=()
+  seen_ext=()
+
+  local row editor root dir base publisher_name match severity match_id key_id
+  for row in ${editor_roots[@]+"${editor_roots[@]}"}; do
+    editor="${row%%|*}"
+    root="${row##*|}"
+    [[ -d "$root" ]] || continue
+    for dir in "$root"/*/; do
+      [[ -d "$dir" ]] || continue
+      base=$(basename "$dir")
+      case "$base" in
+      .* | node_modules | extensions.json | .obsolete | .extensionPackInfo) continue ;;
+      esac
+      # Parse "publisher.name-1.2.3" or "publisher.name-1.2.3-darwin-arm64"
+      # by stripping the first -<digit> and everything after.
+      publisher_name=$(printf '%s' "$base" | sed -E 's/-[0-9].*$//')
+      [[ -z "$publisher_name" ]] && continue
+      case "$publisher_name" in
+      *.*) ;;
+      *) continue ;;
+      esac
+      key_id="${editor}:${publisher_name}"
+      if _arr_contains "$key_id" ${seen_ext[@]+"${seen_ext[@]}"}; then
+        continue
+      fi
+      seen_ext+=("$key_id")
+      total=$((total + 1))
+      match=$(_catalog_match "editor_extension" "$publisher_name")
+      if [[ -n "$match" ]]; then
+        severity="${match%%|*}"
+        match_id="${match##*|}"
+        suspicious_count=$((suspicious_count + 1))
+        [[ "$severity" == "critical" ]] && fail_count=$((fail_count + 1))
+        suspicious_hits+=("${editor}:${publisher_name}|${severity}|${match_id}")
+      fi
+    done
+  done
+
+  if [[ "$total" -eq 0 ]]; then
+    skip "No editor extensions found (no .vscode / .cursor / .windsurf / .vscodium extensions dirs)" "" "dev.editor_extensions.count"
+  else
+    skip "Editor extensions detected: $total installed (deduped by editor+publisher.name)" "Informational — see dev.editor_extensions.suspicious for catalog-matched entries. Editor extensions run with full read/write access to your repos, secrets, and editor session." "dev.editor_extensions.count"
+  fi
+
+  if ! $CATALOG_LOADED; then
+    skip "No exposure catalog loaded — supply --exposure-catalog to surface known-bad editor extension publishers" "" "dev.editor_extensions.suspicious"
+    return
+  fi
+  if [[ "$suspicious_count" -eq 0 ]]; then
+    pass "No catalog-matched suspicious editor extensions installed" "dev.editor_extensions.suspicious"
+    return
+  fi
+  local out="" entry sev_label
+  if [[ "$REDACT" != "true" ]]; then
+    for entry in "${suspicious_hits[@]}"; do
+      sev_label="${entry#*|}"
+      sev_label="${sev_label%|*}"
+      [[ -n "$out" ]] && out="$out, "
+      out="$out${entry%%|*} [$sev_label]"
+    done
+  fi
+  if [[ "$fail_count" -gt 0 ]]; then
+    if [[ "$REDACT" == "true" ]]; then
+      fail "$suspicious_count editor extension(s) match exposure catalog (critical: $fail_count)" "Uninstall: editor → Extensions → search → Uninstall. Restart the editor. If the extension had access to secrets or a wallet, rotate those credentials." "dev.editor_extensions.suspicious"
+    else
+      fail "Catalog-matched editor extensions: $out" "Uninstall: editor → Extensions → search → Uninstall. Restart the editor. Rotate credentials the extension might have accessed." "dev.editor_extensions.suspicious"
+    fi
+  else
+    if [[ "$REDACT" == "true" ]]; then
+      warn "$suspicious_count editor extension(s) match exposure catalog (informational)" "Review and remove if no longer trusted." "dev.editor_extensions.suspicious"
+    else
+      warn "Catalog-matched editor extensions: $out" "Review the catalog-named extensions; remove if no longer trusted." "dev.editor_extensions.suspicious"
+    fi
+  fi
+}
+
+_check_mcp_servers() {
+  # mcp.servers.count + mcp.servers.unpinned + mcp.servers.remote_http
+  # + mcp.servers.suspicious
+  #
+  # CRITICAL hygiene: this helper never captures, prints, or surfaces env
+  # values or env key names from any MCP host config. MCP configs frequently
+  # embed provider credentials in their env blocks. We extract server IDs
+  # and aggregate counts ONLY.
+  #
+  # Parsing strategy is heuristic: each config is validated as JSON with
+  # `plutil -convert json` (when available — Linux CI without plutil falls back
+  # to a permissive read), then flattened with `tr` and scanned with grep / sed. We extract
+  # server IDs by enumerating dict keys at depth 2 inside the
+  # "mcpServers" / "servers" envelope, and globally count @latest / Docker
+  # :latest / remote URL transports. Attribution of unpinned / remote rows
+  # to specific server IDs would require a full JSON parser; the count is
+  # sufficient for posture purposes.
+  #
+  # Hermetic override: MCP_CONFIG_PATHS (array of full paths).
+  local MCP_CONFIG_PATHS_DEFAULT=(
+    "$HOME/.cursor/mcp.json"
+    "$HOME/.claude/.mcp.json"
+    "$HOME/.codeium/windsurf/mcp_config.json"
+    "$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+    "$HOME/.gemini/settings.json"
+  )
+
+  local -a mcp_paths
+  if [[ -n "${MCP_CONFIG_PATHS+set}" ]]; then
+    mcp_paths=(${MCP_CONFIG_PATHS[@]+"${MCP_CONFIG_PATHS[@]}"})
+  else
+    mcp_paths=("${MCP_CONFIG_PATHS_DEFAULT[@]}")
+    # Also pick up plugin-mounted .mcp.json / mcp.json files under ~/.claude/.
+    if [[ -d "$HOME/.claude" ]]; then
+      local sub
+      while IFS= read -r sub; do
+        [[ -n "$sub" && -f "$sub" ]] && mcp_paths+=("$sub")
+      done < <(find "$HOME/.claude" -maxdepth 3 \( -name '.mcp.json' -o -name 'mcp.json' \) -type f 2>/dev/null)
+    fi
+  fi
+
+  local total=0 unpinned=0 remote=0 suspicious_count=0 fail_count=0
+  local any_config_found=false
+  local -a server_ids suspicious_hits
+  server_ids=()
+  suspicious_hits=()
+
+  local cfg flat envelope_inner ids sid upcount has_docker rcount
+  for cfg in ${mcp_paths[@]+"${mcp_paths[@]}"}; do
+    [[ -f "$cfg" ]] || continue
+    any_config_found=true
+    # Validate (skip silently if malformed) when plutil is available.
+    # NOTE: `plutil -lint` only validates property lists and rejects ALL JSON
+    # ("Unexpected character {"), so it cannot be used here — MCP configs are
+    # JSON. `-convert json -o /dev/null` parses the file as JSON, writes the
+    # result nowhere (original untouched), and exits non-zero only on malformed
+    # input.
+    if command -v plutil >/dev/null 2>&1; then
+      plutil -convert json -o /dev/null -- "$cfg" >/dev/null 2>&1 || continue
+    fi
+    # Flatten newlines so grep can match cross-line patterns.
+    flat=$(tr '\n' ' ' <"$cfg" 2>/dev/null) || continue
+    envelope_inner=""
+    if [[ "$flat" == *'"mcpServers"'* ]]; then
+      envelope_inner=$(printf '%s' "$flat" | sed -E 's/.*"mcpServers"[[:space:]]*:[[:space:]]*\{//')
+    elif [[ "$flat" == *'"servers"'* ]]; then
+      envelope_inner=$(printf '%s' "$flat" | sed -E 's/.*"servers"[[:space:]]*:[[:space:]]*\{//')
+    else
+      envelope_inner="$flat"
+    fi
+
+    # Enumerate top-level dict keys (every "<id>" : { match in the inner block).
+    # Reserved JSON config keys are filtered out so we don't count
+    # nested "env" / "command" / "args" maps as servers. `|| true` swallows
+    # grep's no-match exit-1 so pipefail doesn't bubble it to the caller.
+    ids=$(printf '%s' "$envelope_inner" | grep -oE '"[^"]+"[[:space:]]*:[[:space:]]*\{' 2>/dev/null | sed -n 's/^"\([^"]*\)".*/\1/p' || true)
+    while IFS= read -r sid; do
+      [[ -z "$sid" ]] && continue
+      case "$sid" in
+      mcpServers | servers | env | command | args | transport | headers | type | inputs | metadata) continue ;;
+      esac
+      total=$((total + 1))
+      server_ids+=("$sid")
+    done <<<"$ids"
+
+    # Count unpinned: @latest occurrences in args context.
+    # Trailing `|| true` swallows grep's "no match = exit 1" so $(...) does not
+    # propagate that exit through `set -o pipefail` to the function caller.
+    upcount=$(printf '%s' "$flat" | grep -oE '@latest' 2>/dev/null | wc -l | tr -d '[:space:]' || true)
+    [[ -z "$upcount" ]] && upcount=0
+    # Docker images with :latest tag.
+    has_docker=$(printf '%s' "$flat" | grep -cE '"command"[[:space:]]*:[[:space:]]*"(docker|podman)"' 2>/dev/null || true)
+    [[ -z "$has_docker" ]] && has_docker=0
+    if [[ "$has_docker" -gt 0 ]]; then
+      local doclat
+      doclat=$(printf '%s' "$flat" | grep -oE '"[A-Za-z0-9_./-]+:latest"' 2>/dev/null | wc -l | tr -d '[:space:]' || true)
+      [[ -z "$doclat" ]] && doclat=0
+      upcount=$((upcount + doclat))
+    fi
+    unpinned=$((unpinned + upcount))
+
+    # Count remote HTTP transports — url / httpUrl / serverUrl with http(s) value.
+    rcount=$(printf '%s' "$flat" | grep -oE '"(url|httpUrl|serverUrl)"[[:space:]]*:[[:space:]]*"https?://' 2>/dev/null | wc -l | tr -d '[:space:]' || true)
+    [[ -z "$rcount" ]] && rcount=0
+    remote=$((remote + rcount))
+  done
+
+  # Catalog matching on server IDs.
+  local match severity match_id
+  for sid in ${server_ids[@]+"${server_ids[@]}"}; do
+    match=$(_catalog_match "mcp_server" "$sid")
+    if [[ -n "$match" ]]; then
+      severity="${match%%|*}"
+      match_id="${match##*|}"
+      suspicious_count=$((suspicious_count + 1))
+      [[ "$severity" == "critical" ]] && fail_count=$((fail_count + 1))
+      suspicious_hits+=("${sid}|${severity}|${match_id}")
+    fi
+  done
+
+  if ! $any_config_found; then
+    skip "No MCP config files found (no Cursor/Claude/Windsurf/Gemini configs detected)" "" "mcp.servers.count"
+    skip "No MCP config files found" "" "mcp.servers.unpinned"
+    skip "No MCP config files found" "" "mcp.servers.remote_http"
+    skip "No MCP config files found" "" "mcp.servers.suspicious"
+    return
+  fi
+
+  if [[ "$total" -eq 0 ]]; then
+    skip "MCP config(s) present but no servers configured" "" "mcp.servers.count"
+  else
+    skip "MCP servers configured: $total" "Each MCP server runs with the full filesystem + network access of the host process (Claude Desktop / Cursor / Windsurf / Gemini). Review periodically — host Settings → MCP." "mcp.servers.count"
+  fi
+
+  if [[ "$unpinned" -eq 0 ]]; then
+    pass "No MCP servers reference @latest or unpinned Docker tags" "mcp.servers.unpinned"
+  else
+    warn "$unpinned MCP launcher(s) reference @latest or :latest" "Unpinned MCP launchers fetch the newest registry release each time the host starts — a supply-chain compromise of the upstream package propagates immediately. Pin each entry to an exact version (or Docker image digest)." "mcp.servers.unpinned"
+  fi
+
+  if [[ "$remote" -eq 0 ]]; then
+    pass "No MCP servers configured via remote HTTP/SSE transports" "mcp.servers.remote_http"
+  else
+    warn "$remote MCP server(s) configured via remote HTTP/SSE endpoints" "Remote MCP transports send tool calls (and tool-call results, which may include file contents) to a third-party server. Treat the operator as a privileged third party. For web3 / wallet-related work, prefer local stdio MCP servers." "mcp.servers.remote_http"
+  fi
+
+  if ! $CATALOG_LOADED; then
+    skip "No exposure catalog loaded — supply --exposure-catalog to surface known-bad MCP server IDs" "" "mcp.servers.suspicious"
+    return
+  fi
+  if [[ "$suspicious_count" -eq 0 ]]; then
+    pass "No catalog-matched MCP servers configured" "mcp.servers.suspicious"
+    return
+  fi
+  local out="" entry sev_label
+  if [[ "$REDACT" != "true" ]]; then
+    for entry in "${suspicious_hits[@]}"; do
+      sev_label="${entry#*|}"
+      sev_label="${sev_label%|*}"
+      [[ -n "$out" ]] && out="$out, "
+      out="$out${entry%%|*} [$sev_label]"
+    done
+  fi
+  if [[ "$fail_count" -gt 0 ]]; then
+    if [[ "$REDACT" == "true" ]]; then
+      fail "$suspicious_count MCP server(s) match exposure catalog (critical: $fail_count)" "Remove the matching entries from the host config and rotate any credentials passed to the server in its env block." "mcp.servers.suspicious"
+    else
+      fail "Catalog-matched MCP servers: $out" "Remove the matching entries from the host config and rotate any credentials passed to the server in its env block." "mcp.servers.suspicious"
+    fi
+  else
+    if [[ "$REDACT" == "true" ]]; then
+      warn "$suspicious_count MCP server(s) match exposure catalog (informational)" "Review and remove if no longer trusted." "mcp.servers.suspicious"
+    else
+      warn "Catalog-matched MCP servers: $out" "Review the catalog-named servers; remove if no longer trusted." "mcp.servers.suspicious"
+    fi
+  fi
+}
+
+section_26_browser_extension_inventory() {
+  # ═════════════════════════════════════════════════════════════════════════════
+  # 26 · Browser Extension Inventory (catalog-driven)
+  # ═════════════════════════════════════════════════════════════════════════════
+  section "26 · Browser Extension Inventory"
+  _check_browser_extensions_inventory
+}
+
+section_27_editor_extension_inventory() {
+  # ═════════════════════════════════════════════════════════════════════════════
+  # 27 · Editor Extension Inventory (catalog-driven)
+  # ═════════════════════════════════════════════════════════════════════════════
+  section "27 · Editor Extension Inventory"
+  _check_editor_extensions
+}
+
+section_28_mcp_servers() {
+  # ═════════════════════════════════════════════════════════════════════════════
+  # 28 · MCP Server Audit
+  # ═════════════════════════════════════════════════════════════════════════════
+  section "28 · MCP Server Audit"
+  _check_mcp_servers
+}
+
 run_all_sections() {
   section_01_system_integrity
   section_02_login_lock
@@ -4386,6 +4998,9 @@ run_all_sections() {
   section_23_device_mgmt_privacy
   section_24_ide_trust
   section_25_messaging
+  section_26_browser_extension_inventory
+  section_27_editor_extension_inventory
+  section_28_mcp_servers
 }
 
 _diff_parse_rows() {
@@ -4515,6 +5130,7 @@ emit_summary() {
       "$JSON_HOST" "$JSON_MACOS" "$JSON_ARCH" \
       "$PASS_N" "$WARN_N" "$FAIL_N" "$SKIP_N" \
       "$JSON_BODY"
+    ${SUMMARY_LINE:-false} && _emit_summary_line
     [[ "$FAIL_N" -gt 0 ]] && exit 1 || exit 0
   fi
 
@@ -4547,14 +5163,99 @@ emit_summary() {
 
   echo
   printf "%sDone. Re-run after each change to track progress.%s\n" "$DIM" "$NC"
+  ${SUMMARY_LINE:-false} && _emit_summary_line
 
   [[ "$FAIL_N" -gt 0 ]] && exit 1 || exit 0
 }
 
+run_selftest() {
+  # End-to-end smoke test. Exits non-zero if the script can no longer
+  # perform what it should — meant for post-deploy confidence (MDM rollout,
+  # CI binary stamp, etc.).
+  #
+  # FULLY HERMETIC: no disk I/O at all. The catalog arrays are populated
+  # in-memory rather than via the file-based loader, so the script's
+  # read-only invariant is preserved even during self-checks. The file
+  # parser is exercised separately by tests/sections/29_exposure_catalog.bats.
+  #
+  # The selftest verifies three paths:
+  #   1. _catalog_match returns expected severities for known categories
+  #      across multiple input cases (exact ID, case-folded publisher.name,
+  #      mcp server id, and a confirmed miss).
+  #   2. _record / pass counter increment as documented.
+  #   3. _apply_profile rewrites status when a profile rule fires.
+  local rc=0 out
+  # Populate fixture catalog data directly into the parallel arrays.
+  CATALOG_CATEGORIES=("browser_extension_id" "editor_extension" "mcp_server")
+  CATALOG_NAMES=("bumblebee-selftest-evil-aaaaaaaaaaaaaaaaaaaa" "bumblebee.selftest-evil" "bumblebee-selftest-evil")
+  CATALOG_SEVERITIES=("critical" "warn" "critical")
+  CATALOG_IDS=("selftest-1" "selftest-2" "selftest-3")
+  CATALOG_LOADED=true
+
+  out=$(_catalog_match "browser_extension_id" "bumblebee-selftest-evil-aaaaaaaaaaaaaaaaaaaa")
+  if [[ "$out" != "critical|selftest-1" ]]; then
+    printf 'selftest FAIL: browser_extension_id match got %q\n' "$out" >&2
+    rc=1
+  fi
+  out=$(_catalog_match "editor_extension" "BUMBLEBEE.SELFTEST-EVIL")
+  if [[ "$out" != "warn|selftest-2" ]]; then
+    printf 'selftest FAIL: editor_extension case-insensitive match got %q\n' "$out" >&2
+    rc=1
+  fi
+  out=$(_catalog_match "mcp_server" "bumblebee-selftest-evil")
+  if [[ "$out" != "critical|selftest-3" ]]; then
+    printf 'selftest FAIL: mcp_server match got %q\n' "$out" >&2
+    rc=1
+  fi
+  out=$(_catalog_match "browser_extension_id" "nonexistent")
+  if [[ -n "$out" ]]; then
+    printf 'selftest FAIL: nonexistent match got %q\n' "$out" >&2
+    rc=1
+  fi
+  # _record counter increment.
+  MODE="full"
+  PROFILE="normal"
+  REDACT=false
+  RED="" GREEN="" YELLOW="" BLUE="" DIM="" BOLD="" NC=""
+  local before="$PASS_N"
+  pass "selftest pass label" "selftest.pass" >/dev/null
+  if [[ "$PASS_N" -ne $((before + 1)) ]]; then
+    printf 'selftest FAIL: pass counter did not increment\n' >&2
+    rc=1
+  fi
+  # _apply_profile rewrites a synthetic status when a real rule fires.
+  # ext.wallet warn -> fail under web3 is a stable rule.
+  PROFILE="web3"
+  out=$(_apply_profile warn ext.wallet)
+  if [[ "$out" != "fail" ]]; then
+    printf 'selftest FAIL: _apply_profile web3 ext.wallet warn -> %q (expected fail)\n' "$out" >&2
+    rc=1
+  fi
+  if [[ "$rc" -eq 0 ]]; then
+    printf 'selftest OK (catalog + match + record + profile paths verified)\n'
+  else
+    printf 'selftest FAILED (rc=%d) - this build may be corrupt\n' "$rc" >&2
+  fi
+  exit "$rc"
+}
+
+_emit_summary_line() {
+  # Machine-parseable single-line summary suitable for log scraping.
+  # Stable shape: tokens are key=value pairs separated by single spaces,
+  # values URL-percent-free, no quoting required.
+  printf 'mac-posture-audit summary version=%s profile=%s pass=%d warn=%d fail=%d skip=%d\n' \
+    "$SCRIPT_VERSION" "${PROFILE:-normal}" "$PASS_N" "$WARN_N" "$FAIL_N" "$SKIP_N"
+}
+
 main() {
   parse_args "$@"
+  if $SELFTEST; then
+    init_colors
+    run_selftest
+  fi
   detect_runtime
   init_colors
+  load_exposure_catalog
   print_header
   run_all_sections
   emit_summary

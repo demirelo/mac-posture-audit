@@ -16,6 +16,8 @@ backup.tm.recency
 boot.kexts.disabled
 boot.secure.full
 browser.default
+browser.extensions.count
+browser.extensions.suspicious
 browser.installed
 browser.password_autofill
 browser.profile_count
@@ -34,6 +36,8 @@ cred.shellrc.patterns
 data.crypto.cloud_sync_exposure
 data.dotfiles.cloud_sync_exposure
 data.ssh.cloud_sync_exposure
+dev.editor_extensions.count
+dev.editor_extensions.suspicious
 ext.firefox.protective
 ext.firefox.total
 ext.firefox.wallet
@@ -66,6 +70,10 @@ login.autologin.disabled
 login.lock.immediate
 login.touchid.sudo
 login.window.namepw
+mcp.servers.count
+mcp.servers.remote_http
+mcp.servers.suspicious
+mcp.servers.unpinned
 messaging.telegram.advisory
 network.airdrop.discoverable
 network.listening.all_interfaces

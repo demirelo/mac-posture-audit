@@ -69,9 +69,23 @@ reset_state() {
   DIM=""
   BOLD=""
   NC=""
+  # v1.2.0: reset exposure-catalog + selftest + summary-line state.
+  EXPOSURE_CATALOG_PATH=""
+  CATALOG_LOADED=false
+  CATALOG_CATEGORIES=()
+  CATALOG_NAMES=()
+  CATALOG_SEVERITIES=()
+  CATALOG_IDS=()
+  SUMMARY_LINE=false
+  SELFTEST=false
   # Drop any AV_TABLE override left from a previous test so the section
   # falls back to AV_TABLE_DEFAULT unless a test sets it explicitly.
   unset AV_TABLE
+  # Drop any *_ROOTS overrides left from previous v1.2 tests.
+  unset BROWSER_EXT_CHROMIUM_ROOTS
+  unset BROWSER_EXT_FIREFOX_ROOTS
+  unset EDITOR_EXT_ROOTS
+  unset MCP_CONFIG_PATHS
 }
 
 assert_recorded() {

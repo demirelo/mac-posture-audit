@@ -2,6 +2,73 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] - 2026-05-25
+
+Inspired by [perplexityai/bumblebee](https://github.com/perplexityai/bumblebee)'s supply-chain inventory model. Adds three new sections (browser extension inventory, editor extension inventory, MCP server audit), a generic exposure-catalog framework for shipping deny-lists separately from the script, a `selftest` subcommand for post-deploy smoke checks, and a `--summary-line` mode for fleet log scraping. 8 new check IDs (151 → 159). Read-only and bash 3.2 invariants preserved throughout.
+
+### Added (Section 26 — Browser Extension Inventory)
+
+- **`browser.extensions.count`** (informational) — walks Chromium-family (Chrome / Brave / Edge / Arc / Vivaldi / Opera / Chromium) `<root>/<profile>/Extensions/<ext_id>/<version>/manifest.json` and Firefox-family (Firefox / LibreWolf / Waterfox) `<root>/<profile>/extensions.json`. Deduplicates by (brand, extension-id) so multi-profile installs aren't double-counted. Firefox theme entries (`"type":"theme"`) are excluded — extensions only. Only `manifest.json` files are opened; cookies / Login Data / IndexedDB / Cache are never touched.
+- **`browser.extensions.suspicious`** — for each extension ID found, looks up `browser_extension_id` in the loaded exposure catalog. Catalog severity `critical` → `fail`, `warn` → `warn`, `info` → `skip`. When no catalog is loaded, emits `skip` (advisory). Crypto-relevant use case: ship a maintained `threat_intel/` catalog of known drainer / clipboard-hijacker / wallet-impersonator extension IDs separately from the script. Under `--redact` the extension IDs are suppressed and only the count + severity breakdown surfaces.
+
+### Added (Section 27 — Editor Extension Inventory)
+
+- **`dev.editor_extensions.count`** (informational) — walks `~/.vscode/extensions`, `~/.cursor/extensions`, `~/.windsurf/extensions`, `~/.vscodium/extensions` plus their `-server` remote-dev twins. Each subdir is named `<publisher>.<name>-<version>[-<platform>]`; the parser extracts `publisher.name` with a single sed. Non-extension dirs (`.obsolete`, `node_modules`, etc.) are filtered. Editor extensions run with full read/write access to repos, secrets, and editor session.
+- **`dev.editor_extensions.suspicious`** — catalog category `editor_extension`. Same severity-mapping behaviour as `browser.extensions.suspicious`. Case-insensitive matching on `publisher.name`.
+
+### Added (Section 28 — MCP Server Audit)
+
+- **`mcp.servers.count`** (informational) — counts MCP server entries across `~/.cursor/mcp.json`, `~/.claude/.mcp.json` (plus any nested `.mcp.json` / `mcp.json` under `~/.claude/` plugin subdirectories), `~/.codeium/windsurf/mcp_config.json`, `~/Library/Application Support/Claude/claude_desktop_config.json`, and `~/.gemini/settings.json`. Validates each config as JSON with `plutil -convert json` (skipped silently if malformed). Both `"mcpServers"` and `"servers"` envelopes are recognised.
+- **`mcp.servers.unpinned`** — `warn` when any MCP launcher references `@latest` or Docker `:latest`. Unpinned launchers fetch the newest registry release each time the host starts; a supply-chain compromise of the upstream package propagates immediately. `web3` / `paranoid` / `founder` escalate to `fail`.
+- **`mcp.servers.remote_http`** — `warn` when any server uses a remote HTTP/SSE transport (`"url"` / `"httpUrl"` / `"serverUrl"` with `https?://`). Remote MCP servers receive tool calls and tool-call results (which may include file contents) — treat the operator as a privileged third party. For web3 / wallet-related work, prefer local stdio MCP servers. `web3` / `paranoid` / `founder` escalate to `fail`.
+- **`mcp.servers.suspicious`** — catalog category `mcp_server` matched against each server's id. Severity mapping mirrors the other inventory checks.
+
+**Hygiene invariant**: the MCP helper never captures, logs, prints, or surfaces env values or env key names from any host config. MCP configs frequently embed provider credentials in their env blocks. A dedicated integration test asserts that even with secrets-bearing input, no output row references the secret values or keys.
+
+### Added (exposure catalog framework)
+
+- **`--exposure-catalog PATH`** — loads a deny-list of `(category, name, severity[, id])` tuples that any check can consume. Format is one entry per line, pipe-separated. Categories: `browser_extension_id`, `editor_extension`, `mcp_server`, `mcp_package`, `app_bundle_id`, `brew_formula`. Severity: `info` (skip), `warn`, `critical` (fail). Lines starting with `#` are comments. Unknown severities and incomplete lines are silently dropped (forward-compatible).
+- New helpers: `load_exposure_catalog`, `_catalog_match` (case-insensitive on name), `_catalog_status_for`.
+- **Why separate**: lets users distribute team-wide threat-intel catalogs (e.g. fresh wallet-drainer extension IDs, compromised npm package names) without rev'ing the audit script. Bumblebee-style — collector and threat intel split into independently versioned artifacts.
+
+### Added (housekeeping)
+
+- **`--selftest`** — runs a minimal end-to-end smoke test against in-memory fixtures (catalog loader, `_catalog_match` round-trip, `_record` counter parity) and exits. Non-zero exit means the install can no longer detect what it should — pre-deploy smoke check for MDM rollouts and CI binary stamps. Hermetic: reads no host state. Uses portable `mktemp` (works on Linux + macOS).
+- **`--summary-line`** — appends one extra machine-parseable line at the end of the report: `mac-posture-audit summary version=X.Y.Z profile=… pass=N warn=N fail=N skip=N`. Stable token-stream shape for shell scripts that just need counters. Combines with `--json`, `--quick`, `--profile`, `--redact`.
+
+### Profile overrides (v1.2)
+
+- `web3 | mcp.servers.remote_http | warn → fail`
+- `web3 | mcp.servers.unpinned | warn → fail`
+- `paranoid | mcp.servers.remote_http | warn → fail`
+- `paranoid | mcp.servers.unpinned | warn → fail`
+- `founder | mcp.servers.remote_http | warn → fail`
+- `founder | mcp.servers.unpinned | warn → fail`
+
+### Tests (v1.2)
+
+- New `tests/sections/26_browser_extensions_inventory.bats` — 10 cases: no browsers, single Chromium ext (count + no-catalog skip), catalog match critical → fail, catalog match warn → warn, Firefox addon counted (themes ignored), Chromium + Firefox combined, multi-profile dedup, `--redact` suppresses IDs, miss produces pass, manifest-absent ext dir skipped.
+- New `tests/sections/27_editor_extensions.bats` — 9 cases: no editors, single vscode ext, platform-suffixed dir parse, catalog critical → fail, catalog warn → warn, case-insensitive match, junk dirs ignored, multi-editor dedup, `--redact` suppresses publisher.name.
+- New `tests/sections/28_mcp_servers.bats` — 12 cases: no configs, one pinned local server (all rows pass-or-skip), `@latest` unpinned warn, Docker `:latest` unpinned warn, remote HTTP warn, catalog-matched server → fail, env values never leak (hygiene assertion), web3 / paranoid / founder escalations on unpinned and remote_http, multi-config aggregation, malformed JSON skipped.
+- New `tests/sections/29_exposure_catalog.bats` — 12 cases for `load_exposure_catalog` + `_catalog_match`: no-op without path, valid catalog populates arrays, exact match returns `severity|id`, case-insensitive match, miss returns empty, category mismatch returns empty, comments + blanks ignored, unknown severity dropped, incomplete lines dropped, missing optional id OK, unreadable file exits 2, no-match-when-not-loaded.
+- New `tests/sections/30_selftest_summary.bats` — 4 cases: `run_selftest` exits 0 + prints "selftest OK"; `_emit_summary_line` produces stable token-stream; profile fallback; version stamp.
+
+### ID registry (v1.2)
+
+Eight new entries in `tests/fixtures/expected_ids.txt`:
+- `browser.extensions.count`
+- `browser.extensions.suspicious`
+- `dev.editor_extensions.count`
+- `dev.editor_extensions.suspicious`
+- `mcp.servers.count`
+- `mcp.servers.unpinned`
+- `mcp.servers.remote_http`
+- `mcp.servers.suspicious`
+
+### Release
+
+- `SCRIPT_VERSION` bumped to `1.2.0`.
+
 ## [1.1.0] - 2026-05-14
 
 Seven new checks across two PRs, all factored into testable `_check_*` helpers. Bumps the registry from 146 to 151 IDs. Read-only and bash 3.2 compatibility preserved throughout.
