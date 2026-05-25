@@ -52,14 +52,14 @@ parse_args() {
   # MODE controls output format: "full" (terminal) or "json".
   # QUICK / NETWORK / REDACT are independent booleans — combine freely.
   MODE="full"
-  QUICK=false      # --quick: skip sudo-required checks
-  NETWORK=false    # --network: allow external probes (default off)
-  REDACT=false     # --redact: mask host/email/usernames/IPs/paths in output
-  PROFILE="normal"           # --profile: severity calibration (normal|web3|paranoid|developer|founder)
-  DIFF_PATH=""               # --diff: compare current run against previous JSON
-  EXPOSURE_CATALOG_PATH=""   # --exposure-catalog: deny-list (line-based "category|name|severity[|id]")
-  SUMMARY_LINE=false         # --summary-line: emit a machine-parseable one-line summary at end of run
-  SELFTEST=false             # --selftest: run a minimal end-to-end smoke test against in-tree fixtures and exit
+  QUICK=false              # --quick: skip sudo-required checks
+  NETWORK=false            # --network: allow external probes (default off)
+  REDACT=false             # --redact: mask host/email/usernames/IPs/paths in output
+  PROFILE="normal"         # --profile: severity calibration (normal|web3|paranoid|developer|founder)
+  DIFF_PATH=""             # --diff: compare current run against previous JSON
+  EXPOSURE_CATALOG_PATH="" # --exposure-catalog: deny-list (line-based "category|name|severity[|id]")
+  SUMMARY_LINE=false       # --summary-line: emit a machine-parseable one-line summary at end of run
+  SELFTEST=false           # --selftest: run a minimal end-to-end smoke test against in-tree fixtures and exit
   expect_profile=false
   expect_diff=false
   expect_catalog=false
@@ -4552,7 +4552,7 @@ _check_browser_extensions_inventory() {
   suspicious_hits=()
   seen_ext=()
 
-  local row brand root profile_dir ext_dir version_dir manifest ext_id ver
+  local row brand root profile_dir ext_dir version_dir manifest ext_id
   local match severity match_id key_id
   for row in ${chromium_roots[@]+"${chromium_roots[@]}"}; do
     brand="${row%%|*}"
@@ -4576,7 +4576,6 @@ _check_browser_extensions_inventory() {
           manifest="${version_dir}manifest.json"
           [[ -f "$manifest" ]] || continue
           has_manifest=true
-          ver=$(basename "$version_dir")
           break
         done
         $has_manifest || continue
@@ -4705,7 +4704,8 @@ _check_editor_extensions() {
       [[ -d "$dir" ]] || continue
       base=$(basename "$dir")
       case "$base" in
-      .* | node_modules | extensions.json | .obsolete | .extensionPackInfo) continue ;;
+      # .* catches hidden VS Code metadata (.obsolete, .extensionPackInfo, etc.)
+      .* | node_modules | extensions.json) continue ;;
       esac
       # Parse "publisher.name-1.2.3" or "publisher.name-1.2.3-darwin-arm64"
       # by stripping the first -<digit> and everything after.
