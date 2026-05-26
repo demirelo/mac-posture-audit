@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-05-26
+
+The "Supply-chain / Agent Blast-Radius Update." Answers a new question: if a poisoned package, IDE extension, MCP server, or AI-agent instruction file ran on this Mac, what could it plausibly *reach*? Adds a new section for AI agent instruction-file hygiene, webhook/exfil-shape detection across the config surfaces that run automatically, registry-credential exposure, a supply-chain blast-radius composite, and two named attack chains. 169 → 183 checks; 29 → 30 sections. Detects posture and dangerous *shapes*, not malware — and never reads or prints a secret value, full URL, token, or matched line. Read-only, single-file, bash 3.2, no-network invariants preserved (no python3 at runtime — hidden-Unicode detection is byte-matched with `LC_ALL=C grep`).
+
+### Added
+
+- **§30 AI Agent Instruction Hygiene** — two-tier discovery of the files that steer coding agents (Tier-1 filenames: `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, …; Tier-2: agent extensions under `.cursor/` / `.claude/` / `.codex/` / … dirs) under approved project roots. New IDs: `agent.instructions.present` (skip/info, redacted basenames), `agent.instructions.hidden_unicode` (zero-width U+200B/C/D, word-joiner U+2060, bidi U+202A–E / U+2066–9), `agent.instructions.suspicious_directives` (conservative prompt-injection / live-off-the-land phrase set), `agent.instructions.webhook_destination`. Bounded scan: depth 3, ≤256 KB/file, ≤200 files, junk dirs pruned; matched lines/URLs/tokens never printed. Hermetic test override `AGENT_INSTRUCTION_ROOTS`.
+- **Webhook / exfil-shape detection** across config surfaces that run automatically — `mcp.servers.webhook_destination` (§28), `shell.webhook_destination` (§13), `persistence.launchagent.webhook_destination` (§22), `agent.instructions.webhook_destination` (§30), aggregated by `config.webhook_exfil_shape`. Detects Discord/Slack/Telegram/webhook.site/RequestBin/Pipedream/IFTTT/Zapier; reports the provider name only.
+- **Registry-credential exposure** — `supply.npm_token.on_disk` (`~/.npmrc`), `supply.pypirc.credentials.on_disk` (`~/.pypirc`), and the `supply.registry_credentials.present` composite (incl. existing cargo/gem rows). The token shape is detected; the value is never read or printed.
+- **`supply.blast_radius`** — composite that scores stacked amplifiers (lifecycle scripts, wallet without isolation, on-disk registry tokens, no sandbox, no outbound monitor, filesystem-capable MCP, plaintext shell-rc secrets, poisoned agent instructions) into one verdict. High-blast; `founder`/`web3`/`developer` fail one step sooner. The internal score is never shown.
+- **`chain.supply_to_wallet`** — a poisoned dependency install reaching an unisolated wallet (wallet + weak isolation + an install-time exec path + a containment gap). Default `warn`; `web3`/`founder` → `fail`.
+- **`chain.agent_supply_chain`** — an agent/IDE/MCP surface, an agent-exec risk on it, and a valuable on-host target (registry tokens / SSH keys / shell-rc secrets / wallet). Default `warn`; `developer`/`founder`/`web3` → `fail`.
+- **`--explain`** coverage for the new high-value IDs (both new chains, `supply.blast_radius`, the `agent.instructions.*` family, the webhook rows, and `supply.registry_credentials.*`).
+
+### Changed
+
+- §29 is now "Attack-Chain & Blast-Radius Composites" — it remains the terminal cross-section pass and now also emits `supply.blast_radius` and `config.webhook_exfil_shape`. §30 (agent instructions) runs just before it so the chains can read its rows.
+
 ## [1.5.0] - 2026-05-26
 
 Threat-model and prioritization polish on top of v1.3's decision layer. Adds a `journalist` profile and a `--profile auto` recommender, remediation-effort ranking so high-impact / low-effort wins stand out, and a fourth named attack chain. 168 → 169 checks; read-only / bash 3.2 invariants preserved (the only write remains the opt-in `--snapshot`).

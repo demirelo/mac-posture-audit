@@ -50,7 +50,7 @@ If the user's lens is unclear, ask **one** specific question (e.g., "Do you hold
 
 These are pairs/triples of rows that are individually low-signal or `skip`/`warn`, but together indicate something the user should know.
 
-**Six of these are now first-class check IDs in the audit itself.** They aggregate the constituent rows and emit a single posture verdict so the user can't miss the combined signal. The remaining ones live here as guidance for an AI reviewer that wants to do additional synthesis (e.g. cross-reference user context the audit can't have).
+**Most of these are now first-class check IDs in the audit itself.** They aggregate the constituent rows and emit a single posture verdict so the user can't miss the combined signal. The remaining ones live here as guidance for an AI reviewer that wants to do additional synthesis (e.g. cross-reference user context the audit can't have).
 
 | § | Pattern | Composite check ID | Status |
 |---|---|---|---|
@@ -72,6 +72,12 @@ These are pairs/triples of rows that are individually low-signal or `skip`/`warn
 | 3.16 | Wallet-drain attack chain | `chain.wallet_drain` | ✅ baked in (v1.3) |
 | 3.17 | Agent-exposure attack chain | `chain.agent_exposure` | ✅ baked in (v1.3) |
 | 3.18b | Cloud-exfil attack chain | `chain.cloud_exfil` | ✅ baked in (v1.5) |
+| 3.19 | AI agent instruction hygiene | `agent.instructions.{present,hidden_unicode,suspicious_directives,webhook_destination}` | ✅ baked in (v1.6, §30) |
+| 3.20 | Webhook / exfil shapes in config | `config.webhook_exfil_shape` + `{mcp.servers,shell,persistence.launchagent,agent.instructions}.webhook_destination` | ✅ baked in (v1.6) |
+| 3.21 | Registry credentials on disk | `supply.registry_credentials.present` + `supply.npm_token.on_disk` + `supply.pypirc.credentials.on_disk` | ✅ baked in (v1.6) |
+| 3.22 | Supply-chain blast radius | `supply.blast_radius` | ✅ baked in (v1.6) |
+| 3.23 | Supply-to-wallet attack chain | `chain.supply_to_wallet` | ✅ baked in (v1.6) |
+| 3.24 | Agent-supply-chain attack chain | `chain.agent_supply_chain` | ✅ baked in (v1.6) |
 
 ### 3.0 VPN killswitch posture → `network.vpn.killswitch`
 
@@ -200,6 +206,32 @@ When a `chain.*` fires, lead with it: it already names the combination, so you d
 
 The audit now emits a profile-aware **`executive_verdict`** and a ranked **`top_risks`** array (JSON), and an "Executive Verdict" + "Top risks to address" block (text). This is a *light* prioritization layer — it ranks by action priority (`urgent`/`high`/`medium`/`low`) so the highest-leverage findings surface first. Treat it as a starting point, not the final word: it deliberately does **not** encode the deep, user-specific "why this matters for YOU" synthesis — that's still your job, using this guide. The verdict stays calm when `fail == 0` (a clean baseline with concentrated risk reads as `Action priority: high`, never "compromised").
 
+### 3.19 AI agent instruction hygiene (v1.6) → `agent.instructions.*` (§30)
+
+§30 discovers the files that steer coding agents and flags dangerous *shapes* in them. Discovery is two-tier and bounded — Tier-1 filenames (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `copilot-instructions.md`, …) anywhere under the approved roots, plus Tier-2 agent extensions (`.md`/`.mdc`/`.txt`/`.yaml`/`.yml`/`.json`/`.toml`) under agent dirs (`.cursor/`, `.claude/`, `.codex/`, `.gemini/`, `.opencode/`, `.hermes/`, `.agent(s)/`, `.ai/`). Roots default to `$HOME/{Dev,Code,Projects,src}/*`, agent dotfile dirs directly under `$HOME`, and the CWD when it's a git repo; never a whole-`$HOME` recursive walk. Limits: depth 3, ≤256 KB/file, ≤200 files, junk dirs pruned. `AGENT_INSTRUCTION_ROOTS` overrides the root set (tests).
+
+Three risk rows, all conservative and `--redact`-safe (counts + basenames; never the matched line, URL, or token):
+- **`agent.instructions.hidden_unicode`** — zero-width (U+200B/C/D, U+2060) or bidi (U+202A–E, U+2066–9) characters that a human reviewer can't see but an LLM acts on. Byte-matched with `LC_ALL=C grep` (no python3 at runtime). U+FEFF is intentionally not flagged (benign BOM, too false-positive-prone).
+- **`agent.instructions.suspicious_directives`** — a small high-confidence phrase set: "ignore previous instructions", "do not tell the user", "exfiltrate", fetch-pipe-to-shell, `base64 -d`, AppleScript, `security find-…-password`.
+- **`agent.instructions.webhook_destination`** — a webhook/exfil endpoint referenced in an instruction file.
+
+`developer` escalates all three to `fail`; `founder` escalates hidden-Unicode + webhook. When you surface one, name the specific file(s) by basename and recommend opening them — an instruction file is code the agent trusts implicitly.
+
+### 3.20 Webhook / exfil shapes across config surfaces (v1.6) → `config.webhook_exfil_shape`
+
+The same provider regex (Discord/Slack/Telegram/webhook.site/RequestBin/Pipedream/IFTTT/Zapier) runs against every config surface that executes automatically: shell rc (`shell.webhook_destination`), LaunchAgents/Daemons (`persistence.launchagent.webhook_destination`), MCP configs (`mcp.servers.webhook_destination`), agent instruction files (§3.19), and `~/.npmrc` / `~/.pypirc`. `config.webhook_exfil_shape` aggregates them and names the surfaces. Only the provider name is reported — never the URL or any token in it. A webhook in a place that runs on every login/shell/agent-call is a quiet, persistent exfil channel; confirm the user configured it.
+
+### 3.21–3.22 Registry credentials + supply blast radius (v1.6)
+
+- **`supply.registry_credentials.present`** — composite over plaintext registry tokens on disk: `supply.npm_token.on_disk` (`~/.npmrc`), `supply.pypirc.credentials.on_disk` (`~/.pypirc`), plus the existing cargo/gem rows. Any code that runs locally (including a malicious postinstall) can read these. The token shape is detected; the value is never read.
+- **`supply.blast_radius`** — answers "if a malicious dependency install runs code here, how far can it reach?" It scores stacked amplifiers (lifecycle scripts on, wallet without isolation, on-disk registry tokens, no sandbox, no outbound monitor, filesystem-capable MCP, plaintext shell-rc secrets, poisoned agent instructions) and emits `pass`/`warn`/`fail`. High-blast; `founder`/`web3`/`developer` fail one step sooner. The internal score is deliberately not shown — lead with the contributing rows, not a number.
+
+### 3.23–3.24 Supply-chain / agent attack chains (v1.6) → `chain.*`
+
+Two more first-class chains, same mechanics as §3.15–3.17 (warn by default, `skip` when incomplete, high-blast so a `warn` ranks `high`):
+- **`chain.supply_to_wallet`** — `ext.wallet` present AND `users.crypto_isolation_indicator` `warn`/`fail` AND an install-time exec path (lifecycle scripts / loose IDE trust / autorun tasks / poisoned agent instructions) AND a containment gap (no sandbox OR no outbound monitor). `web3`/`founder` → `fail`. The "one bad `npm install` next to your wallet" story.
+- **`chain.agent_supply_chain`** — an agent/IDE/MCP surface exists AND it carries an exec risk (fs/remote MCP, autorun tasks, loose trust, poisoned instructions) AND a valuable on-host target shares the machine (registry tokens / SSH keys / shell-rc secrets / wallet). `developer`/`founder`/`web3` → `fail`. The pivot-from-agent-to-secrets story.
+
 ## 4. Things that are NOT issues
 
 The audit emits a lot of rows that look concerning until you understand the context. Don't surface these as gaps:
@@ -214,6 +246,7 @@ The audit emits a lot of rows that look concerning until you understand the cont
 - `browser.profile_count: pass` or `skip` — Purely observational. `pass` with multiple profiles means the user already has some isolation; don't recommend additional changes. `skip "Single browser profile"` is a soft nudge worth surfacing if other wallet-related rows are firing (§3.3), but is not a gap on its own.
 - Single high `ext.total.count` — Browser extension count alone isn't actionable without knowing the contents.
 - `browser.installed` informational — Counts and reports, doesn't fail.
+- `agent.instructions.present: skip` — Discovering instruction files is informational, not a gap; it just scopes the three risk rows below it. And `agent.instructions.suspicious_directives: warn` is a conservative *shape* match — it fires on any file containing phrases like "ignore previous instructions" or a pipe-to-shell snippet, which includes legitimate security tooling, prompt-engineering notes, and docs that *discuss* these patterns (this very repo's docs would trip it). Treat it as "open these files and confirm," not proof of compromise. Same for `agent.instructions.webhook_destination` on a webhook the user deliberately wired up.
 
 ## 5. How to surface findings to the user
 
