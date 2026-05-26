@@ -20,3 +20,5 @@ posture-*.txt
 
 # gstack local artifacts (security reports, etc.)
 .gstack/
+__pycache__/
+*.pyc
