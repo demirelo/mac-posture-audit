@@ -40,7 +40,7 @@ Pick the lens that fits the user before reading the rows. The same `warn` row ca
 
 **Solo founder shipping crypto-adjacent code.** Lives in both threat models simultaneously: writes / merges code (dependency confusion, malicious `postinstall`, unencrypted SSH keys, IDE workspace trust) AND custodies crypto (wallet exposure, remote-access apps, cloud-sync exfil of seed material). Profile as `--profile founder` — explicit union of `developer` and `web3` escalations.
 
-**Journalist / activist / dissident.** Threat model includes nation-state spyware. Lockdown Mode flips from "skip" to "should be ON." Bluetooth, AirDrop, MDM, telemetry, unfamiliar profiles all become concerns. Profile as `--profile paranoid`.
+**Journalist / activist / dissident.** Threat model includes nation-state spyware. Lockdown Mode flips from "skip" to "should be ON." Bluetooth, AirDrop, MDM, telemetry, unfamiliar profiles all become concerns. Profile as `--profile journalist` (v1.5 — surfaces Lockdown-off and hardens the surveillance surface: RF, telemetry, remote access, browser debugging, VPN killswitch, stale software). `--profile paranoid` remains the broader lock-everything-down option.
 
 **Shared / family Mac.** Multiple human users, mixed trust. Service accounts in admin group, sharing services, AirDrop mode all matter more.
 
@@ -67,7 +67,11 @@ These are pairs/triples of rows that are individually low-signal or `skip`/`warn
 | 3.11 | iCloud blast radius | `cloud.icloud.desktop_documents_sync` + `data.*.cloud_sync_exposure` | ✅ baked in (per-check) |
 | 3.12 | Remote-access crypto-theft surface | `apps.remote_access.present` + `tcc.holders` + `ext.wallet` | ✅ baked in (per-check) |
 | 3.13 | Cloud-sync exfiltration | `data.ssh.cloud_sync_exposure` + `data.crypto.cloud_sync_exposure` + `data.dotfiles.cloud_sync_exposure` | ✅ baked in (per-domain) |
-| 3.14 | IDE malicious-repo auto-run | `ide.vscode.workspace_trust` + `ide.cursor.workspace_trust` | ✅ baked in (per-IDE) |
+| 3.14 | IDE malicious-repo auto-run | `ide.{vscode,cursor}.workspace_trust` + `ide.{vscode,cursor}.automatic_tasks` | ✅ baked in (per-IDE) |
+| 3.15 | Fake-interview attack chain | `chain.fake_interview` | ✅ baked in (v1.3) |
+| 3.16 | Wallet-drain attack chain | `chain.wallet_drain` | ✅ baked in (v1.3) |
+| 3.17 | Agent-exposure attack chain | `chain.agent_exposure` | ✅ baked in (v1.3) |
+| 3.18b | Cloud-exfil attack chain | `chain.cloud_exfil` | ✅ baked in (v1.5) |
 
 ### 3.0 VPN killswitch posture → `network.vpn.killswitch`
 
@@ -182,6 +186,20 @@ The check uses `grep`, not a JSONC parser. VS Code's settings.json is JSONC (JSO
 
 Cross-reference: if `users.crypto_isolation_indicator` is also firing (§3.3) and `apps.remote_access.present` is on (§3.12), the IDE trust posture should be the next thing surfaced — these three together describe the full "fake interview" attack chain: tools to phish the user, no workflow isolation to contain damage, and the IDE itself acting as the payload's runtime.
 
+### 3.15–3.17 Named attack chains (v1.3) → `chain.*`
+
+v1.3 promotes three of the prose chains above into first-class rows that fire **only when the full path is assembled**. Each is `warn` by default and `fail` under `web3`/`founder`; all are high-blast (so even a `warn` ranks `high` in the decision layer, a `fail` ranks `urgent`). They are deliberately mechanical — when the chain is incomplete they emit an informational `skip`, not noise.
+
+- **`chain.fake_interview`** — (`ide.*.workspace_trust` loose OR `ide.*.automatic_tasks` on) AND no sandbox runtime available. The §3.14 + §3.12 story as one row. Remote-access apps are an amplifier you can layer on, not part of the row's logic. Note the sandbox signal is read from detection state, not `sandbox.runtime.present`'s status (which is always `skip`).
+- **`chain.wallet_drain`** — `ext.wallet` present AND `users.crypto_isolation_indicator` is `warn`/`fail` AND `network.outboundmonitor.running` ≠ `pass`. Funds movable, exfiltration unflagged.
+- **`chain.agent_exposure`** — MCP present with `mcp.servers.filesystem_capable` or `mcp.servers.remote_http` AND `ext.wallet` present. An agent with file/network reach on the same machine as a wallet.
+
+When a `chain.*` fires, lead with it: it already names the combination, so you don't have to reconstruct it from constituents. Layer your own context (is the user actively job-hunting? is the MCP server one they installed?) on top.
+
+### 3.18 The in-tool decision layer (v1.3)
+
+The audit now emits a profile-aware **`executive_verdict`** and a ranked **`top_risks`** array (JSON), and an "Executive Verdict" + "Top risks to address" block (text). This is a *light* prioritization layer — it ranks by action priority (`urgent`/`high`/`medium`/`low`) so the highest-leverage findings surface first. Treat it as a starting point, not the final word: it deliberately does **not** encode the deep, user-specific "why this matters for YOU" synthesis — that's still your job, using this guide. The verdict stays calm when `fail == 0` (a clean baseline with concentrated risk reads as `Action priority: high`, never "compromised").
+
 ## 4. Things that are NOT issues
 
 The audit emits a lot of rows that look concerning until you understand the context. Don't surface these as gaps:
@@ -247,7 +265,9 @@ Each result row in the JSON has these fields:
 | `label` | yes | Human-readable summary. May be reworded across versions. |
 | `hint` | yes (often `""`) | Remediation pointer. |
 
-Top-level: `host`, `macos`, `arch`, `summary`, `results`. Full schema: [`schema.md`](schema.md). Canonical fixed-id list: [`tests/fixtures/expected_ids.txt`](../tests/fixtures/expected_ids.txt). Templated-id patterns: [`tests/fixtures/expected_id_patterns.txt`](../tests/fixtures/expected_id_patterns.txt).
+Top-level: `host`, `macos`, `arch`, `summary` (now incl. `total`), `executive_verdict`, `top_risks` (each entry carries an `effort` hint as of v1.5.0), `results` — the verdict/top_risks/total trio added in v1.3.0 (additive). Full schema: [`schema.md`](schema.md).
+
+Output modes for a reviewer (v1.4+): `--report md` (shareable Markdown), `tools/render_report.py` (stdlib Python → self-contained HTML from a JSON document), `--snapshot` (append a redacted JSON to `~/.mac-posture-audit/history/` — the only write the tool performs), and `--trend` (read-only oldest-vs-newest delta). `--profile auto` recommends a profile from detected signals and exits. Canonical fixed-id list: [`tests/fixtures/expected_ids.txt`](../tests/fixtures/expected_ids.txt). Templated-id patterns: [`tests/fixtures/expected_id_patterns.txt`](../tests/fixtures/expected_id_patterns.txt).
 
 `--diff <previous.json>` produces a structured changelog by `id` between two runs — useful for a longitudinal review of "what improved or regressed since last week."
 
