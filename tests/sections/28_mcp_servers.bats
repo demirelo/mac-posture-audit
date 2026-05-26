@@ -255,3 +255,43 @@ write_catalog() {
 
   assert_recorded skip "MCP servers configured: 1"
 }
+
+# ── mcp.servers.webhook_destination (v1.6) ─────────────────────────────────
+
+@test "webhook URL in an MCP env value — webhook_destination warn, no leak" {
+  load_script
+  isolate_home
+  local cfg="$BATS_TEST_TMPDIR/cursor.json"
+  write_mcp_config "$cfg" '{"mcpServers":{"notify":{"command":"npx","args":["-y","@a/x@1.0"],"env":{"HOOK":"https://discord.com/api/webhooks/42/SECRETTOKEN"}}}}'
+  MCP_CONFIG_PATHS=("$cfg")
+
+  _check_mcp_servers
+
+  assert_recorded warn "MCP config(s) reference a webhook destination"
+  [[ "${RESULTS_WARN[*]}" == *"Discord"* ]]
+  local all="${RESULTS_PASS[*]:-} ${RESULTS_WARN[*]:-} ${RESULTS_FAIL[*]:-} ${RESULTS_SKIP[*]:-}"
+  [[ "$all" != *"SECRETTOKEN"* ]]
+  [[ "$all" != *"api/webhooks/42"* ]]
+}
+
+@test "no webhook in MCP configs — webhook_destination pass" {
+  load_script
+  isolate_home
+  local cfg="$BATS_TEST_TMPDIR/cursor.json"
+  write_mcp_config "$cfg" '{"mcpServers":{"a":{"command":"npx","args":["-y","@foo/bar@1.0.0"]}}}'
+  MCP_CONFIG_PATHS=("$cfg")
+
+  _check_mcp_servers
+
+  assert_recorded pass "No webhook/exfil destinations referenced in MCP configs"
+}
+
+@test "no MCP configs — webhook_destination skip" {
+  load_script
+  isolate_home
+  MCP_CONFIG_PATHS=("$BATS_TEST_TMPDIR/does-not-exist.json")
+
+  _check_mcp_servers
+
+  assert_recorded skip "No MCP config files found"
+}

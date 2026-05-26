@@ -30,7 +30,7 @@
 # shellcheck disable=SC2088
 set -uo pipefail
 
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.6.0"
 
 # ── State ───────────────────────────────────────────────────────────────────
 PASS_N=0
@@ -502,6 +502,20 @@ PROFILE_OVERRIDES=(
   "journalist|network.vpn.killswitch|warn|fail"
   "journalist|update.macos.recency|warn|fail"
   "journalist|update.auto|warn|fail"
+  # v1.6 — Supply-chain / Agent Blast-Radius. Single findings are NOT
+  # over-escalated; the chains and the blast-radius composite carry the fail.
+  # (supply.blast_radius escalates by an in-code threshold, not here, so a low
+  # score is never lifted to fail by the profile — see _check_supply_blast_radius.)
+  "developer|agent.instructions.hidden_unicode|warn|fail"
+  "developer|agent.instructions.suspicious_directives|warn|fail"
+  "developer|agent.instructions.webhook_destination|warn|fail"
+  "developer|chain.agent_supply_chain|warn|fail"
+  "founder|agent.instructions.hidden_unicode|warn|fail"
+  "founder|agent.instructions.webhook_destination|warn|fail"
+  "founder|chain.supply_to_wallet|warn|fail"
+  "founder|chain.agent_supply_chain|warn|fail"
+  "web3|chain.supply_to_wallet|warn|fail"
+  "web3|chain.agent_supply_chain|warn|fail"
 )
 
 # Apply the profile severity table to a (status, id) pair. Returns the
@@ -537,7 +551,7 @@ _apply_profile() {
 # by _id_matches_pattern), so "ide.*.workspace_trust" and "chain.*" work. Every
 # literal id here must exist in tests/fixtures/expected_ids.txt; a CI test
 # asserts each entry resolves to a known id or a documented glob.
-HIGH_BLAST_IDS="ext.wallet ssh.keys.unencrypted system.theft_resistance mcp.servers.remote_http ide.*.workspace_trust ide.*.automatic_tasks chain.*"
+HIGH_BLAST_IDS="ext.wallet ssh.keys.unencrypted system.theft_resistance mcp.servers.remote_http supply.blast_radius ide.*.workspace_trust ide.*.automatic_tasks chain.*"
 
 # Optional / cosmetic hardening — a warn on one of these is `low`, not `medium`.
 LOW_TIER_IDS="network.firewall.blockall network.firewall.stealth folder.downloads.stale"
@@ -548,7 +562,7 @@ LOW_TIER_IDS="network.firewall.blockall network.firewall.stealth folder.download
 # stand up backups, re-key SSH, move sensitive dirs, encrypt the disk, or
 # dismantle a multi-step chain). Everything else is medium. Globs supported.
 EFFORT_LOW_IDS="network.firewall.blockall network.firewall.stealth network.bluetooth.off network.airdrop.discoverable folder.downloads.stale privacy.lockdown.on privacy.ads.off privacy.diagnostics.off update.auto browser.password_autofill browser.remote_debugging ide.*.workspace_trust ide.*.automatic_tasks mcp.servers.unpinned"
-EFFORT_HIGH_IDS="ext.wallet ssh.keys.unencrypted system.filevault.on system.theft_resistance backup.recovery_path backup.offsite users.crypto_isolation_indicator data.ssh.cloud_sync_exposure data.crypto.cloud_sync_exposure data.dotfiles.cloud_sync_exposure chain.*"
+EFFORT_HIGH_IDS="ext.wallet ssh.keys.unencrypted system.filevault.on system.theft_resistance backup.recovery_path backup.offsite users.crypto_isolation_indicator data.ssh.cloud_sync_exposure data.crypto.cloud_sync_exposure data.dotfiles.cloud_sync_exposure supply.blast_radius chain.*"
 
 # _id_matches_pattern ID PATTERN_SET — true if ID matches any space-separated
 # pattern in PATTERN_SET. Patterns are unquoted in [[ == ]] so shell globs
@@ -883,6 +897,76 @@ redact_list() {
     out="${out}$(redact "$kind" "$item")"
   done
   printf '%s' "$out"
+}
+
+# ── v1.6 shared shape detectors (read-only, no python3 at runtime) ──────────
+# Reused across §13 (shell rc), §22 (LaunchAgents), §28 (MCP configs), §30
+# (agent instruction files) and the terminal composites. Each scans a file and
+# reports a SHAPE — never a secret value, a full URL, a token, or a matched line.
+
+# Webhook/exfil destinations an attacker reuses for one-line data theft. The
+# patterns mirror the providers documented in docs/AGENTS.md; we surface only
+# the provider NAME, never the URL or any token embedded in it.
+_webhook_providers_in_file() {
+  # _webhook_providers_in_file FILE — comma-separated provider names (or empty).
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  local out="" probe label pat
+  for probe in \
+    'Discord|discord(app)?\.com/api/webhooks' \
+    'Telegram|api\.telegram\.org/bot' \
+    'Slack|hooks\.slack\.com/services' \
+    'webhook.site|webhook\.site/' \
+    'RequestBin|requestbin' \
+    'Pipedream|pipedream\.com/e/' \
+    'IFTTT|maker\.ifttt\.com/trigger' \
+    'Zapier|hooks\.zapier\.com'; do
+    label="${probe%%|*}"
+    pat="${probe#*|}"
+    if LC_ALL=C grep -qiE "$pat" "$f" 2>/dev/null; then
+      [[ -n "$out" ]] && out="$out, "
+      out="$out$label"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# _has_hidden_unicode FILE — return 0 if FILE contains a zero-width or
+# bidirectional control character that has no legitimate use in a plaintext
+# instruction file: U+200B/C/D (zero-width space / non-joiner / joiner),
+# U+2060 (word joiner), U+202A..U+202E and U+2066..U+2069 (bidi overrides /
+# isolates). Byte-matched with `LC_ALL=C grep -F` so the core auditor never has
+# to shell out to python3 (which can trigger an Xcode CLT install on fresh
+# macOS). U+FEFF is deliberately NOT flagged: a leading byte-order mark is
+# benign and common, and telling a BOM apart from a mid-text occurrence
+# reliably across grep builds is not worth the false positives.
+_has_hidden_unicode() {
+  local f="$1"
+  [[ -f "$f" ]] || return 1
+  LC_ALL=C grep -qF \
+    -e $'\xe2\x80\x8b' -e $'\xe2\x80\x8c' -e $'\xe2\x80\x8d' -e $'\xe2\x81\xa0' \
+    -e $'\xe2\x80\xaa' -e $'\xe2\x80\xab' -e $'\xe2\x80\xac' -e $'\xe2\x80\xad' \
+    -e $'\xe2\x80\xae' -e $'\xe2\x81\xa6' -e $'\xe2\x81\xa7' -e $'\xe2\x81\xa8' \
+    -e $'\xe2\x81\xa9' "$f" 2>/dev/null
+}
+
+# _has_suspicious_directive FILE — return 0 if FILE contains a conservative
+# prompt-injection / live-off-the-land phrase. We match SHAPES and never print
+# the matched line. The fetch-pipe-to-shell and AppleScript tokens are written
+# with a leading bracket class ([c]url, [w]get, [o]sascript) so this source line
+# is itself NOT flagged by scripts/check-read-only.sh — the bracket defeats the
+# tripwire's literal command-position match while still matching at runtime.
+_has_suspicious_directive() {
+  local f="$1"
+  [[ -f "$f" ]] || return 1
+  # Phrase set 1 — prompt-injection / secrecy directives.
+  LC_ALL=C grep -qiE \
+    'ignore (all )?(previous|prior|above) (instruction|prompt)|disregard (all |the )?(previous|prior|above)|do not (tell|inform|mention to|reveal to) the user|without (telling|informing) the user|exfiltrat' \
+    "$f" 2>/dev/null && return 0
+  # Phrase set 2 — execution / credential-lookup shapes.
+  LC_ALL=C grep -qiE \
+    '([c]url|[w]get)[^|]*[|][[:space:]]*(sh|bash|zsh)|base64[[:space:]]+(-d|--decode)|[o]sascript|security[[:space:]]+find-(generic|internet)-password' \
+    "$f" 2>/dev/null
 }
 
 # ── Cloud-sync root detection ───────────────────────────────────────────────
@@ -2922,6 +3006,73 @@ _check_supply_uv_config() {
   fi
 }
 
+# _dedup_csv "a b a c" → "a, b, c" (space/comma separated → sorted unique list).
+_dedup_csv() {
+  printf '%s' "$1" | tr ', ' '\n\n' | grep -v '^[[:space:]]*$' | sort -u | paste -sd, - | sed 's/,/, /g'
+}
+
+_check_supply_npm_token() {
+  # npm registry auth tokens written to ~/.npmrc in plaintext. A poisoned
+  # postinstall — or any local process — can read the file and publish/install
+  # as you. We detect the SHAPE only (the key name) and never print the value.
+  local npmrc="$HOME/.npmrc"
+  if [[ ! -f "$npmrc" ]]; then
+    skip "No ~/.npmrc to scan for registry tokens" "" "supply.npm_token.on_disk"
+    return
+  fi
+  if grep -qiE '(_authtoken|_auth|_password)[[:space:]]*=' "$npmrc" 2>/dev/null; then
+    warn "npm registry auth token stored in plaintext in ~/.npmrc" "A token on disk is reachable by any code that runs locally, including a malicious install script. Prefer a short-lived token injected via the NPM_TOKEN env var at CI time; rotate long-lived tokens. (The token value is never read or printed by this audit.)" "supply.npm_token.on_disk"
+  else
+    pass "No plaintext npm registry token in ~/.npmrc" "supply.npm_token.on_disk"
+  fi
+}
+
+_check_supply_pypirc_creds() {
+  # PyPI upload credentials in ~/.pypirc. Same blast radius as an npm token:
+  # local code can publish as you. Detect the shape (password / token markers).
+  local pypirc="$HOME/.pypirc"
+  if [[ ! -f "$pypirc" ]]; then
+    skip "No ~/.pypirc to scan for upload credentials" "" "supply.pypirc.credentials.on_disk"
+    return
+  fi
+  if grep -qiE '^[[:space:]]*password[[:space:]]*[:=]|pypi-|__token__' "$pypirc" 2>/dev/null; then
+    warn "PyPI upload credentials stored in plaintext in ~/.pypirc" "Anything that runs locally can read the file and publish as you. Prefer a per-publish API token in an env var or keyring; rotate any long-lived token. (The value is never read or printed by this audit.)" "supply.pypirc.credentials.on_disk"
+  else
+    pass "No plaintext PyPI upload credentials in ~/.pypirc" "supply.pypirc.credentials.on_disk"
+  fi
+}
+
+_check_shell_webhook() {
+  # Webhook/exfil-shaped destinations hard-coded in shell rc files. A shell rc
+  # that POSTs to a webhook can ship data on every login/shell. Provider name
+  # only — never the URL or token.
+  local rc sw_hits=0 sw_provs="" sw_p
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.zshenv" "$HOME/.zprofile" "$HOME/.profile"; do
+    [[ -f "$rc" ]] || continue
+    sw_p=$(_webhook_providers_in_file "$rc")
+    [[ -n "$sw_p" ]] && sw_hits=$((sw_hits + 1)) && sw_provs="$sw_provs $sw_p"
+  done
+  if [[ "$sw_hits" -eq 0 ]]; then
+    pass "No webhook/exfil destinations referenced in shell rc files" "shell.webhook_destination"
+  else
+    warn "Webhook destination(s) referenced in $sw_hits shell rc file(s): $(_dedup_csv "$sw_provs")" "A shell rc that calls a webhook can quietly exfiltrate data on every shell start. Confirm you added it; remove if unexpected. (No URL or token is read or printed.)" "shell.webhook_destination"
+  fi
+}
+
+_check_supply_registry_credentials() {
+  # Composite over the per-registry credential rows. Warns if any registry
+  # credential is present on disk, so the user sees one "tokens live here" line.
+  local r any=false
+  for r in supply.npm_token.on_disk supply.pypirc.credentials.on_disk supply.cargo.creds supply.gem.creds; do
+    case "$(_status_of "$r")" in warn | fail) any=true ;; esac
+  done
+  if $any; then
+    warn "Package-registry credentials present on disk (npm / PyPI / cargo / gem)" "Tokens on disk are reachable by any code that runs locally — including a malicious postinstall. Prefer env-injected, short-lived tokens and rotate long-lived ones. See the supply.* rows above for which registries." "supply.registry_credentials.present"
+  else
+    pass "No package-registry credentials detected on disk" "supply.registry_credentials.present"
+  fi
+}
+
 section_13_supply_chain() {
   # ═════════════════════════════════════════════════════════════════════════════
   # 13 · Supply Chain (npm / yarn / pnpm)
@@ -3186,6 +3337,14 @@ section_13_supply_chain() {
   else
     pass "Supply-chain posture: acceptable" "supply.posture"
   fi
+
+  # v1.6 — registry credentials on disk + shell-rc webhook shapes, then the
+  # registry-credential composite (reads the npm/pypi rows just emitted plus the
+  # cargo/gem rows from the credential loop above).
+  _check_supply_npm_token
+  _check_supply_pypirc_creds
+  _check_shell_webhook
+  _check_supply_registry_credentials
 
 }
 
@@ -4124,6 +4283,24 @@ section_22_persistence_tcc() {
       fi
     fi
   done
+
+  # v1.6 — webhook/exfil-shaped destinations hard-coded in LaunchAgent /
+  # LaunchDaemon plists. A login/boot item that POSTs to a webhook is a quiet,
+  # persistent exfil channel. Provider name only — never the URL or token.
+  local la_hits=0 la_provs="" la_dir la_plist la_p
+  for la_dir in "$HOME/Library/LaunchAgents" "/Library/LaunchAgents" "/Library/LaunchDaemons"; do
+    [[ -d "$la_dir" ]] || continue
+    while IFS= read -r la_plist; do
+      [[ -f "$la_plist" ]] || continue
+      la_p=$(_webhook_providers_in_file "$la_plist")
+      [[ -n "$la_p" ]] && la_hits=$((la_hits + 1)) && la_provs="$la_provs $la_p"
+    done < <(find "$la_dir" -maxdepth 1 -name '*.plist' 2>/dev/null)
+  done
+  if [[ "$la_hits" -eq 0 ]]; then
+    pass "No webhook/exfil destinations in LaunchAgent/Daemon plists" "persistence.launchagent.webhook_destination"
+  else
+    warn "Webhook destination(s) in $la_hits LaunchAgent/Daemon plist(s): $(_dedup_csv "$la_provs")" "A login/boot item that calls a webhook can exfiltrate data automatically. Inspect the flagged plist(s) and remove anything you didn't install. (No URL or token is read or printed.)" "persistence.launchagent.webhook_destination"
+  fi
 
   # Login items — read-only AppleScript (no `set`, no `do shell script`).
   # Automation of System Events requires the terminal to be granted Automation
@@ -5156,11 +5333,12 @@ _check_mcp_servers() {
 
   local total=0 unpinned=0 remote=0 launcher=0 fscap=0 suspicious_count=0 fail_count=0
   local any_config_found=false
+  local webhook_provs=""
   local -a server_ids suspicious_hits
   server_ids=()
   suspicious_hits=()
 
-  local cfg flat envelope_inner ids sid upcount has_docker rcount lcount fscount
+  local cfg flat envelope_inner ids sid upcount has_docker rcount lcount fscount wp
   for cfg in ${mcp_paths[@]+"${mcp_paths[@]}"}; do
     [[ -f "$cfg" ]] || continue
     any_config_found=true
@@ -5232,6 +5410,11 @@ _check_mcp_servers() {
     fscount=$(printf '%s' "$flat" | grep -oE 'server-filesystem|"/Users/|"/home/|"\$HOME|"~/' 2>/dev/null | wc -l | tr -d '[:space:]' || true)
     [[ -z "$fscount" ]] && fscount=0
     fscap=$((fscap + fscount))
+
+    # Webhook/exfil-shaped destination in the config (often an env value handed
+    # to a server). Provider name only — env values are never captured/printed.
+    wp=$(_webhook_providers_in_file "$cfg")
+    [[ -n "$wp" ]] && webhook_provs="$webhook_provs $wp"
   done
 
   # Catalog matching on server IDs.
@@ -5253,6 +5436,7 @@ _check_mcp_servers() {
     skip "No MCP config files found" "" "mcp.servers.remote_http"
     skip "No MCP config files found" "" "mcp.servers.launcher"
     skip "No MCP config files found" "" "mcp.servers.filesystem_capable"
+    skip "No MCP config files found" "" "mcp.servers.webhook_destination"
     skip "No MCP config files found" "" "mcp.servers.suspicious"
     return
   fi
@@ -5289,6 +5473,14 @@ _check_mcp_servers() {
     pass "No MCP servers appear filesystem-capable" "mcp.servers.filesystem_capable"
   else
     warn "MCP server launcher(s) appear filesystem-capable" "Review configured MCP servers; avoid broad filesystem grants for agent tools. An agent with filesystem reach can read SSH keys, cloud creds, and wallet data." "mcp.servers.filesystem_capable"
+  fi
+
+  # Webhook/exfil-shaped destination referenced in an MCP config. Provider name
+  # only; env values (which often hold the actual webhook URL) are never read.
+  if [[ -z "$webhook_provs" ]]; then
+    pass "No webhook/exfil destinations referenced in MCP configs" "mcp.servers.webhook_destination"
+  else
+    warn "MCP config(s) reference a webhook destination: $(_dedup_csv "$webhook_provs")" "An MCP server told to POST to a webhook can exfiltrate whatever the agent reads. Confirm the destination is one you configured; treat its operator as a privileged third party." "mcp.servers.webhook_destination"
   fi
 
   if ! $CATALOG_LOADED; then
@@ -5423,6 +5615,60 @@ _check_attack_chains() {
     skip "Cloud-exfil chain not present (no sensitive dirs under a cloud-sync root)" "" "chain.cloud_exfil"
     ;;
   esac
+
+  # chain.supply_to_wallet — a poisoned dependency install reaching an
+  # unisolated wallet. Wallet present AND isolation missing AND an install-time
+  # exec path (lifecycle scripts / IDE trust loose / autorun tasks / poisoned
+  # agent instructions) AND a containment gap (no sandbox OR no outbound monitor).
+  local stw_supply=false stw_contain=false r
+  for r in supply.npm.ignorescripts supply.yarn.ignorescripts supply.pnpm.ignorescripts \
+    ide.vscode.workspace_trust ide.cursor.workspace_trust \
+    ide.vscode.automatic_tasks ide.cursor.automatic_tasks \
+    agent.instructions.hidden_unicode agent.instructions.suspicious_directives agent.instructions.webhook_destination; do
+    case "$(_status_of "$r")" in warn | fail)
+      stw_supply=true
+      break
+      ;;
+    esac
+  done
+  _sandbox_available || stw_contain=true
+  [[ "$(_status_of network.outboundmonitor.running)" != "pass" ]] && stw_contain=true
+  if [[ "$wallet" == "warn" || "$wallet" == "fail" ]] &&
+    [[ "$iso" == "warn" || "$iso" == "fail" ]] &&
+    [[ "$stw_supply" == "true" && "$stw_contain" == "true" ]]; then
+    warn "Supply-to-wallet chain: a poisoned dependency could run install-time code that reaches an unisolated wallet" "Lifecycle scripts (or a loose IDE / poisoned agent file) execute attacker code, the wallet shares the machine with no isolation, and nothing contains or flags it. Enable ignore-scripts, isolate the wallet (separate user/profile), and add a sandbox or outbound monitor." "chain.supply_to_wallet"
+  else
+    skip "Supply-to-wallet chain not present (no wallet, isolation healthy, no install-time exec path, or containment in place)" "" "chain.supply_to_wallet"
+  fi
+
+  # chain.agent_supply_chain — an AI agent / IDE / MCP surface, an agent-exec
+  # risk on it, AND a valuable on-host target the agent could reach.
+  local asc_surface=false asc_risk=false asc_target=false
+  [[ "${AGENT_FILES_FOUND:-0}" -gt 0 ]] && asc_surface=true
+  case "$(_status_of mcp.servers.filesystem_capable)" in pass | warn | fail) asc_surface=true ;; esac
+  case "$(_status_of ide.vscode.workspace_trust)" in pass | warn | fail) asc_surface=true ;; esac
+  case "$(_status_of ide.cursor.workspace_trust)" in pass | warn | fail) asc_surface=true ;; esac
+  for r in mcp.servers.filesystem_capable mcp.servers.remote_http \
+    agent.instructions.hidden_unicode agent.instructions.suspicious_directives agent.instructions.webhook_destination \
+    ide.vscode.automatic_tasks ide.cursor.automatic_tasks ide.vscode.workspace_trust ide.cursor.workspace_trust; do
+    case "$(_status_of "$r")" in warn | fail)
+      asc_risk=true
+      break
+      ;;
+    esac
+  done
+  for r in supply.registry_credentials.present ssh.keys.unencrypted cred.shellrc.patterns ext.wallet; do
+    case "$(_status_of "$r")" in warn | fail)
+      asc_target=true
+      break
+      ;;
+    esac
+  done
+  if [[ "$asc_surface" == "true" && "$asc_risk" == "true" && "$asc_target" == "true" ]]; then
+    warn "Agent-supply-chain chain: a compromised agent/IDE/MCP surface can reach valuable on-host targets" "An agent or editor that can run untrusted code (fs/remote MCP, autorun tasks, loose trust, or a poisoned instruction file) shares this machine with registry tokens, SSH keys, shell-rc secrets, or a wallet. Scope agent/MCP privileges, keep workspace trust on, and move secrets off disk." "chain.agent_supply_chain"
+  else
+    skip "Agent-supply-chain chain not present (no agent surface, no agent-exec risk, or no reachable high-value target)" "" "chain.agent_supply_chain"
+  fi
 }
 
 section_29_attack_chains() {
@@ -5432,8 +5678,225 @@ section_29_attack_chains() {
   # These run last because they read constituent rows from many earlier
   # sections (IDE trust §24, sandbox §22, wallet §9/10, crypto isolation §24,
   # outbound monitor §06, MCP §28).
-  section "29 · Attack-Chain Composites"
+  section "29 · Attack-Chain & Blast-Radius Composites"
   _check_attack_chains
+  _check_supply_blast_radius
+  _check_config_webhook_shape
+}
+
+# ── §30 AI agent instruction-file hygiene ───────────────────────────────────
+# Two-tier discovery, deliberately NOT "scan every Markdown file":
+#   Tier 1 — known agent instruction FILENAMES (AGENTS.md, CLAUDE.md, …).
+#   Tier 2 — agent-ish extensions under known agent DIRECTORIES (.cursor/, …).
+# Bounded: depth 3 below each root, ≤256 KB per file, ≤200 files, junk dirs
+# pruned. Roots come from AGENT_INSTRUCTION_ROOTS (test override) or a
+# conservative default set — never a whole-$HOME recursive walk.
+_AGENT_MAX_DEPTH=3
+_AGENT_MAX_FILES=200
+_AGENT_MAX_BYTES=262144
+_AGENT_MAX_ROOTS=60
+
+_agent_find_tier1() {
+  # _agent_find_tier1 ROOT DEPTH — Tier-1 instruction files only, depth-capped.
+  local root="$1" depth="$2"
+  find "$root" -maxdepth "$depth" -type f \( \
+    -name 'AGENTS.md' -o -name 'CLAUDE.md' -o -name 'CLAUDE.local.md' -o -name 'GEMINI.md' \
+    -o -name 'CODEX.md' -o -name 'OPENAI.md' -o -name 'COPILOT.md' -o -name 'OPENCODE.md' \
+    -o -name 'SOUL.md' -o -name 'HERMES.md' -o -name 'OPENCLAW.md' -o -name '.cursorrules' \) \
+    -print 2>/dev/null
+}
+
+_agent_find_in_root() {
+  # Tier-1 (by filename) + Tier-2 (agent extensions under agent dirs), pruned.
+  local root="$1"
+  find "$root" -maxdepth "$_AGENT_MAX_DEPTH" \
+    \( -name .git -o -name node_modules -o -name vendor -o -name dist -o -name build \
+    -o -name .venv -o -name venv -o -name __pycache__ -o -name .next -o -name target \) -prune -o \
+    -type f \( \
+    -name 'AGENTS.md' -o -name 'CLAUDE.md' -o -name 'CLAUDE.local.md' -o -name 'GEMINI.md' \
+    -o -name 'CODEX.md' -o -name 'OPENAI.md' -o -name 'COPILOT.md' -o -name 'OPENCODE.md' \
+    -o -name 'SOUL.md' -o -name 'HERMES.md' -o -name 'OPENCLAW.md' -o -name '.cursorrules' \
+    -o -name 'copilot-instructions.md' \) -print -o \
+    -type f \( -path '*/.cursor/*' -o -path '*/.claude/*' -o -path '*/.codex/*' \
+    -o -path '*/.gemini/*' -o -path '*/.opencode/*' -o -path '*/.hermes/*' \
+    -o -path '*/.agent/*' -o -path '*/.agents/*' -o -path '*/.ai/*' \) \
+    \( -name '*.md' -o -name '*.mdc' -o -name '*.txt' -o -name '*.yaml' -o -name '*.yml' \
+    -o -name '*.json' -o -name '*.toml' \) -print \
+    2>/dev/null
+}
+
+_discover_agent_instruction_files() {
+  # Print candidate agent-instruction file paths (newline-separated, unsorted).
+  local -a roots
+  if [[ -n "${AGENT_INSTRUCTION_ROOTS+set}" ]]; then
+    roots=(${AGENT_INSTRUCTION_ROOTS[@]+"${AGENT_INSTRUCTION_ROOTS[@]}"})
+  else
+    roots=()
+    local base d
+    for base in Dev Code Projects src; do
+      [[ -d "$HOME/$base" ]] || continue
+      for d in "$HOME/$base"/*/; do
+        [[ -d "$d" ]] && roots+=("${d%/}")
+      done
+    done
+    [[ -d "$PWD/.git" && "$PWD" != "$HOME" ]] && roots+=("$PWD")
+    # Tier-1 files that live directly in $HOME (depth 1 only — never recurse $HOME).
+    _agent_find_tier1 "$HOME" 1
+    # Agent dotfile dirs directly under $HOME, scanned as their own roots.
+    for d in .claude .cursor .codex .gemini .opencode .hermes .agent .agents .ai; do
+      [[ -d "$HOME/$d" ]] && roots+=("$HOME/$d")
+    done
+  fi
+  local count=0 r
+  for r in ${roots[@]+"${roots[@]}"}; do
+    count=$((count + 1))
+    [[ "$count" -gt "$_AGENT_MAX_ROOTS" ]] && break
+    [[ -d "$r" ]] || continue
+    _agent_find_in_root "$r"
+  done
+}
+
+_check_agent_instructions() {
+  AGENT_FILES_FOUND=0
+  if $QUICK; then
+    skip "AI agent instruction-file scan skipped in --quick mode" "Re-run without --quick to scan AGENTS.md / CLAUDE.md / .cursor rules etc. for hidden Unicode, suspicious directives, and webhook destinations." "agent.instructions.present"
+    skip "Skipped in --quick mode" "" "agent.instructions.hidden_unicode"
+    skip "Skipped in --quick mode" "" "agent.instructions.suspicious_directives"
+    skip "Skipped in --quick mode" "" "agent.instructions.webhook_destination"
+    return
+  fi
+
+  local -a files
+  files=()
+  local f sz count=0
+  while IFS= read -r f; do
+    [[ -n "$f" && -f "$f" ]] || continue
+    sz=$(stat -f '%z' "$f" 2>/dev/null || echo 0)
+    [[ "$sz" -gt "$_AGENT_MAX_BYTES" ]] && continue
+    files+=("$f")
+    count=$((count + 1))
+    [[ "$count" -ge "$_AGENT_MAX_FILES" ]] && break
+  done < <(_discover_agent_instruction_files 2>/dev/null | sort -u)
+
+  AGENT_FILES_FOUND=${#files[@]}
+
+  if [[ ${#files[@]} -eq 0 ]]; then
+    skip "No AI agent instruction files found in scanned roots" "Looked for AGENTS.md / CLAUDE.md / GEMINI.md / .cursorrules and agent dotfile dirs under your project roots." "agent.instructions.present"
+    skip "No agent instruction files to scan" "" "agent.instructions.hidden_unicode"
+    skip "No agent instruction files to scan" "" "agent.instructions.suspicious_directives"
+    skip "No agent instruction files to scan" "" "agent.instructions.webhook_destination"
+    return
+  fi
+
+  local -a bnames
+  bnames=()
+  for f in "${files[@]}"; do bnames+=("$(basename "$f")"); done
+  local namelist extra=""
+  namelist=$(printf '%s\n' "${bnames[@]}" | sort -u | head -6 | paste -sd, - | sed 's/,/, /g')
+  [[ ${#files[@]} -gt 6 ]] && extra=" …"
+  skip "AI agent instruction file(s) discovered: ${#files[@]} (${namelist}${extra})" "Each file steers an AI agent that runs with your access. The rows below flag hidden Unicode, suspicious directives, and webhook destinations in them." "agent.instructions.present"
+
+  local hu=0 sd=0 wh=0 provs="" p
+  for f in "${files[@]}"; do
+    _has_hidden_unicode "$f" && hu=$((hu + 1))
+    _has_suspicious_directive "$f" && sd=$((sd + 1))
+    p=$(_webhook_providers_in_file "$f")
+    [[ -n "$p" ]] && wh=$((wh + 1)) && provs="$provs $p"
+  done
+
+  if [[ "$hu" -eq 0 ]]; then
+    pass "No agent instruction files contain hidden/zero-width Unicode" "agent.instructions.hidden_unicode"
+  else
+    warn "$hu agent instruction file(s) contain hidden/zero-width or bidirectional Unicode" "Invisible characters can hide instructions a human reviewer won't see but an LLM will act on. Open the flagged file(s) in a hex viewer (xxd) or an editor that reveals zero-width characters and delete anything that isn't visible text." "agent.instructions.hidden_unicode"
+  fi
+
+  if [[ "$sd" -eq 0 ]]; then
+    pass "No agent instruction files contain suspicious directive-shaped phrases" "agent.instructions.suspicious_directives"
+  else
+    warn "$sd agent instruction file(s) contain suspicious directive-shaped phrases" "Conservative match for prompt-injection / live-off-the-land shapes (e.g. 'ignore previous instructions', pipe-to-shell, base64 decode, credential lookups). Review the flagged file(s): a poisoned instruction file steers an agent running on your machine. (The matched lines are never printed.)" "agent.instructions.suspicious_directives"
+  fi
+
+  if [[ "$wh" -eq 0 ]]; then
+    pass "No agent instruction files reference a webhook/exfil destination" "agent.instructions.webhook_destination"
+  else
+    warn "$wh agent instruction file(s) reference a webhook destination: $(_dedup_csv "$provs")" "An agent instructed to POST to a webhook can quietly exfiltrate whatever it can read. Verify the destination is one you configured. (No URL or token is read or printed.)" "agent.instructions.webhook_destination"
+  fi
+}
+
+section_30_agent_instructions() {
+  # ═════════════════════════════════════════════════════════════════════════════
+  # 30 · AI Agent Instruction Hygiene
+  # ═════════════════════════════════════════════════════════════════════════════
+  # Runs after §28 (MCP) and BEFORE §29 by design: §29 is the terminal
+  # cross-section composite pass and reads the agent rows emitted here.
+  section "30 · AI Agent Instruction Hygiene"
+  _check_agent_instructions
+}
+
+_check_supply_blast_radius() {
+  # supply.blast_radius — "if a malicious dependency install runs code here, how
+  # far can it reach?" Internal additive score (never shown); each amplifier is
+  # read post-profile via _status_of so escalations are reflected.
+  local score=0 r
+  for r in supply.npm.ignorescripts supply.yarn.ignorescripts supply.pnpm.ignorescripts; do
+    case "$(_status_of "$r")" in warn | fail)
+      score=$((score + 2))
+      break
+      ;;
+    esac
+  done
+  case "$(_status_of ext.wallet)" in warn | fail)
+    case "$(_status_of users.crypto_isolation_indicator)" in warn | fail) score=$((score + 2)) ;; esac
+    ;;
+  esac
+  case "$(_status_of supply.registry_credentials.present)" in warn | fail) score=$((score + 2)) ;; esac
+  _sandbox_available || score=$((score + 1))
+  [[ "$(_status_of network.outboundmonitor.running)" != "pass" ]] && score=$((score + 1))
+  case "$(_status_of mcp.servers.filesystem_capable)" in warn | fail) score=$((score + 1)) ;; esac
+  case "$(_status_of cred.shellrc.patterns)" in warn | fail) score=$((score + 1)) ;; esac
+  for r in agent.instructions.hidden_unicode agent.instructions.suspicious_directives agent.instructions.webhook_destination; do
+    case "$(_status_of "$r")" in warn | fail)
+      score=$((score + 1))
+      break
+      ;;
+    esac
+  done
+
+  local fail_at=5
+  case "$PROFILE" in founder | web3 | developer) fail_at=4 ;; esac
+  if [[ "$score" -le 1 ]]; then
+    pass "Supply-chain blast radius is low: a bad dependency install has little to reach here" "supply.blast_radius"
+  elif [[ "$score" -ge "$fail_at" ]]; then
+    fail "Supply-chain blast radius is HIGH: a malicious dependency install could reach wallet / keys / secrets with little to contain it" "Several amplifiers stack on this machine. Shrink the radius: enable ignore-scripts, isolate the wallet, move registry tokens off disk, install an outbound monitor, scope MCP filesystem grants, and run unknown installs in a sandbox. Fix the highest-impact supply.* / chain.* rows first." "supply.blast_radius"
+  else
+    warn "Supply-chain blast radius is elevated: a malicious dependency install could reach more than it should" "Amplifiers stack here (e.g. lifecycle scripts, wallet, on-disk tokens, no sandbox/monitor). Address the supply.* and isolation rows above as a set — partial coverage leaves the same hole." "supply.blast_radius"
+  fi
+}
+
+_check_config_webhook_shape() {
+  # config.webhook_exfil_shape — aggregate of the per-area webhook rows plus two
+  # small config files (~/.npmrc, ~/.pypirc) not covered by a per-area row.
+  local surfaces="" spec r label f p
+  for spec in \
+    "mcp.servers.webhook_destination|MCP configs" \
+    "shell.webhook_destination|shell rc" \
+    "persistence.launchagent.webhook_destination|LaunchAgents" \
+    "agent.instructions.webhook_destination|agent instructions"; do
+    r="${spec%%|*}"
+    label="${spec#*|}"
+    case "$(_status_of "$r")" in warn | fail) surfaces="$surfaces, $label" ;; esac
+  done
+  for f in "$HOME/.npmrc" "$HOME/.pypirc"; do
+    [[ -f "$f" ]] || continue
+    p=$(_webhook_providers_in_file "$f")
+    [[ -n "$p" ]] && surfaces="$surfaces, ${f##*/}"
+  done
+  surfaces="${surfaces#, }"
+  if [[ -z "$surfaces" ]]; then
+    pass "No webhook/exfil-shaped destinations in scanned config surfaces" "config.webhook_exfil_shape"
+  else
+    warn "Webhook/exfil-shaped destination(s) in config surface(s): $surfaces" "One-line exfil channels (Discord / Slack / Telegram / webhook.site / etc.) configured where they run automatically. Confirm each is intentional; remove the ones you don't recognise. (No URL or token is read or printed.)" "config.webhook_exfil_shape"
+  fi
 }
 
 run_all_sections() {
@@ -5465,6 +5928,9 @@ run_all_sections() {
   section_26_browser_extension_inventory
   section_27_editor_extension_inventory
   section_28_mcp_servers
+  # §30 runs before §29 by design: §29 is the terminal cross-section composite
+  # pass (chains + blast radius + webhook aggregate) and reads §30's agent rows.
+  section_30_agent_instructions
   section_29_attack_chains
 }
 
@@ -6117,6 +6583,97 @@ extension shares that surface.
 Default: warn. web3 / paranoid / founder: fail.
 Fix: keep wallets in a dedicated browser/profile or a separate macOS user; pair
 with a transaction simulator and a hardware wallet.
+EXPLAIN
+    ;;
+  chain.supply_to_wallet)
+    cat <<'EXPLAIN'
+chain.supply_to_wallet — a poisoned dependency install reaching an unisolated wallet.
+
+Fires when a wallet is present AND its workflow is not isolated AND there is an
+install-time execution path (npm/yarn/pnpm lifecycle scripts, a loose IDE, autorun
+tasks, or a poisoned agent instruction file) AND a containment gap (no sandbox OR
+no outbound monitor). One bad `npm install` can then run code next to your wallet.
+
+Default: warn. web3 / founder: fail.
+Fix: enable ignore-scripts, isolate the wallet (separate user/profile), and add a
+sandbox or outbound monitor so install-time code is contained or flagged.
+EXPLAIN
+    ;;
+  chain.agent_supply_chain)
+    cat <<'EXPLAIN'
+chain.agent_supply_chain — an AI agent/IDE/MCP surface that can reach your secrets.
+
+Fires when an agent/IDE/MCP surface exists, it carries an execution risk
+(filesystem/remote MCP, autorun tasks, loose workspace trust, or a poisoned
+instruction file), AND a valuable target shares the machine (registry tokens, SSH
+keys, shell-rc secrets, or a wallet). A prompt-injected or compromised agent can
+pivot from the surface to the target.
+
+Default: warn. developer / founder / web3: fail.
+Fix: scope MCP/agent privileges to least privilege, keep workspace trust on, and
+move long-lived secrets off disk (env-injected / keychain).
+EXPLAIN
+    ;;
+  supply.blast_radius)
+    cat <<'EXPLAIN'
+supply.blast_radius — how far a malicious dependency install could reach here.
+
+A composite over amplifiers: lifecycle scripts enabled, a wallet without isolation,
+registry credentials on disk, no sandbox, no outbound monitor, a filesystem-capable
+MCP server, plaintext shell-rc secrets, and poisoned agent instructions. The more
+that stack, the more one bad `install` can touch. (The internal score is not shown.)
+
+Default: warn when amplifiers stack; fail when many do. founder / web3 / developer
+fail one step sooner.
+Fix: knock down the contributing supply.* / isolation / containment rows; the
+highest-impact ones are wallet isolation, on-disk tokens, and ignore-scripts.
+EXPLAIN
+    ;;
+  agent.instructions.hidden_unicode | agent.instructions.suspicious_directives | agent.instructions.webhook_destination | agent.instructions.present)
+    cat <<'EXPLAIN'
+agent.instructions.* — hygiene of the files that steer AI agents on your machine.
+
+AGENTS.md / CLAUDE.md / .cursor rules and similar files are read by agents that run
+with your access. This audit flags three shapes in them: hidden/zero-width Unicode
+(instructions a human can't see but an LLM acts on), suspicious directive phrases
+(prompt-injection / pipe-to-shell / credential lookups), and webhook destinations
+(quiet exfiltration channels). Detection is conservative and never prints the
+matched line, URL, or token.
+
+Default: warn. developer escalates all three to fail; founder escalates hidden
+Unicode + webhook to fail.
+Fix: open the flagged file(s), remove anything invisible or unexpected, and treat
+instruction files like code you review before trusting.
+EXPLAIN
+    ;;
+  mcp.servers.webhook_destination | config.webhook_exfil_shape | shell.webhook_destination | persistence.launchagent.webhook_destination)
+    cat <<'EXPLAIN'
+*.webhook_destination / config.webhook_exfil_shape — exfil-shaped destinations in
+config surfaces.
+
+These rows flag references to one-line exfiltration endpoints (Discord, Slack,
+Telegram, webhook.site, RequestBin, Pipedream, IFTTT, Zapier) in places that run
+automatically: MCP configs, shell rc files, LaunchAgents/Daemons, agent instruction
+files, and ~/.npmrc / ~/.pypirc. config.webhook_exfil_shape aggregates them. Only
+the provider NAME is reported — never the URL or any token.
+
+Default: warn (medium). Confirm each destination is one you configured.
+Fix: remove unrecognised webhook calls from automation; route needed ones through
+audited, least-privilege paths.
+EXPLAIN
+    ;;
+  supply.registry_credentials.present | supply.npm_token.on_disk | supply.pypirc.credentials.on_disk)
+    cat <<'EXPLAIN'
+supply.registry_credentials.* — package-registry tokens stored on disk.
+
+npm (~/.npmrc), PyPI (~/.pypirc), cargo, and gem can persist auth tokens in
+plaintext. Any code that runs locally — including a malicious postinstall — can
+read them and publish or pull packages as you. This audit detects the key SHAPE
+only and never reads or prints the token value.
+
+Default: warn. Feeds supply.blast_radius and chain.agent_supply_chain.
+Fix: prefer short-lived tokens injected via env at CI time, or a keychain/credential
+helper; rotate any long-lived token already on disk.
 EXPLAIN
     ;;
   users.crypto_isolation_indicator)
