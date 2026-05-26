@@ -25,20 +25,22 @@ The tripwire is itself regression-tested (`tests/check-read-only/should_{pass,fa
 
 ## What it checks
 
-29 sections, 169 checks, by theme:
+30 sections, 183 checks, by theme:
 
 - **System integrity** — SIP, Gatekeeper, FileVault, Apple Silicon Secure Boot, third-party kernel extensions.
 - **Login & privacy** — auto-login, screen-lock delay, Touch ID for sudo, Apple ads/analytics, Lockdown Mode.
 - **Network** — firewall & stealth, sharing services, AirDrop/Bluetooth/Wi-Fi exposure, DNS/DoH & VPN (incl. killswitch), proxies/PAC/WPAD, `/etc/hosts`, 16 AV/EDR engines, outbound monitors (Little Snitch / LuLu).
 - **Browsers & extensions** — installed/default browser, bundle-version staleness, profile counts, plus a Chromium/Safari/Firefox extension inventory that flags protective, wallet, and transaction-simulator add-ons.
-- **Developer & supply chain** — npm/yarn/pnpm `ignore-scripts`, supply-chain scanners, `.npmrc` and registry rewrites, `gh` / git credential helpers, `extra-index-url` dependency-confusion risk, Homebrew taps, IDE workspace trust + folder-open task autorun + trusted-folder sprawl.
+- **Developer & supply chain** — npm/yarn/pnpm `ignore-scripts`, supply-chain scanners, `.npmrc` and registry rewrites, `gh` / git credential helpers, `extra-index-url` dependency-confusion risk, Homebrew taps, IDE workspace trust + folder-open task autorun + trusted-folder sprawl, plaintext registry tokens on disk (npm/PyPI/cargo/gem), and a `supply.blast_radius` composite that answers "if a malicious dependency install runs code here, how far can it reach?"
 - **Credentials & secrets** — credential patterns in shell rc files, `.env` and sensitive dotfiles, SSH key encryption + agent, git signing.
 - **Crypto & 2FA** — hardware wallets (Ledger / Trezor / Keystone / GridPlus), password managers, YubiKey / FIDO2, and a wallet-isolation composite.
 - **Backups & cloud** — Time Machine destinations / recency / encryption, third-party backup tools, iCloud sync, and sensitive data (`.ssh` / `.aws` / wallets) leaking into cloud-sync roots.
-- **Persistence & access** — LaunchAgents/Daemons, login items, crontab, TCC permission holders, remote-access apps, sandboxes, MDM enrollment, clipboard managers.
-- **Agents & MCP** — MCP servers (Cursor / Claude / Windsurf / Gemini): server count, `@latest`/`:latest` unpinned launchers, remote HTTP/SSE transports, dynamic launchers (npx/uvx/bunx/pipx/docker), and filesystem-capable servers. MCP env values and key names are never read.
+- **Persistence & access** — LaunchAgents/Daemons (incl. webhook/exfil-shaped destinations), login items, crontab, TCC permission holders, remote-access apps, sandboxes, MDM enrollment, clipboard managers.
+- **Agents & MCP** — MCP servers (Cursor / Claude / Windsurf / Gemini): server count, `@latest`/`:latest` unpinned launchers, remote HTTP/SSE transports, dynamic launchers (npx/uvx/bunx/pipx/docker), filesystem-capable servers, and webhook/exfil destinations. MCP env values and key names are never read.
+- **AI agent instruction hygiene** — discovers the files that steer coding agents (`AGENTS.md` / `CLAUDE.md` / `GEMINI.md` / `.cursorrules` / `.cursor` rules, etc.) under your project roots and flags hidden/zero-width Unicode, suspicious directive-shaped phrases (prompt-injection / pipe-to-shell), and webhook destinations. Two-tier discovery with strict bounds (depth 3, ≤256 KB/file, ≤200 files, junk dirs pruned); matched lines, URLs, and tokens are never printed.
+- **Webhook / exfil shapes** — one-line exfil endpoints (Discord/Slack/Telegram/webhook.site/RequestBin/Pipedream/IFTTT/Zapier) detected across config surfaces that run automatically — shell rc, LaunchAgents, MCP configs, agent instruction files, `~/.npmrc` / `~/.pypirc` — aggregated into `config.webhook_exfil_shape`. Provider name only; never the URL or token.
 - **Inventory (catalog-driven)** — browser extensions, editor extensions (VS Code / Cursor / Windsurf / VSCodium), and MCP server IDs, each matchable against an exposure catalog of known-bad IDs.
-- **Attack chains** — named cross-section composites that fire only when a full attack path is assembled: `chain.fake_interview` (IDE auto-runs untrusted code + no sandbox), `chain.wallet_drain` (wallet + no isolation + no outbound monitor), `chain.agent_exposure` (a filesystem/remote MCP agent on the same machine as a wallet), `chain.cloud_exfil` (SSH keys / wallet data / dotfiles under a cloud-sync root).
+- **Attack chains** — named cross-section composites that fire only when a full attack path is assembled: `chain.fake_interview` (IDE auto-runs untrusted code + no sandbox), `chain.wallet_drain` (wallet + no isolation + no outbound monitor), `chain.agent_exposure` (a filesystem/remote MCP agent on the same machine as a wallet), `chain.cloud_exfil` (SSH keys / wallet data / dotfiles under a cloud-sync root), `chain.supply_to_wallet` (a poisoned dependency install reaching an unisolated wallet), `chain.agent_supply_chain` (an agent/IDE/MCP surface that can reach registry tokens, SSH keys, or a wallet).
 
 Several checks are composites that fold multiple rows into a single verdict (`system.theft_resistance`, `backup.recovery_path`, `ssh.posture`, `users.crypto_isolation_indicator`, the `chain.*` attack chains, …). The canonical check list is [tests/fixtures/expected_ids.txt](tests/fixtures/expected_ids.txt); composite patterns and agent-review guidance live in [docs/AGENTS.md](docs/AGENTS.md).
 
