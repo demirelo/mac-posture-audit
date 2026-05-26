@@ -2,6 +2,80 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-05-26
+
+Threat-model and prioritization polish on top of v1.3's decision layer. Adds a `journalist` profile and a `--profile auto` recommender, remediation-effort ranking so high-impact / low-effort wins stand out, and a fourth named attack chain. 168 → 169 checks; read-only / bash 3.2 invariants preserved (the only write remains the opt-in `--snapshot`).
+
+### Added
+
+- **`--profile journalist`** — nation-state-spyware lens. Surfaces Lockdown Mode being off and escalates the surveillance surface to `fail`: Bluetooth/AirDrop, ad + diagnostics telemetry, firewall stealth/block-all, remote-access apps, browser remote debugging, VPN killswitch, and stale software/updates. Deliberately not crypto/supply-chain focused.
+- **`--profile auto`** — advisory: detects signals (IDE apps, dev toolchains on `PATH`, hardware-wallet apps, known wallet browser-extension ids) and prints a recommended profile (`founder`/`web3`/`developer`/`normal`), then exits. Read-only, no scan; never auto-picks `paranoid`/`journalist` (deliberate threat-model choices).
+- **Remediation effort ranking** — every Top Risk now carries an effort hint (`low` = flip a setting, `high` = structural work). Text shows `[tier · effort]`; JSON `top_risks` entries gain an additive `effort` field. Surfaces high-impact / low-effort "fix these first" wins.
+- **`chain.cloud_exfil`** — fourth named attack chain. Fires when SSH keys, wallet data, or dotfiles sit under a cloud-sync root (crystallizes the per-domain `data.*.cloud_sync_exposure` rows). Default `warn`; `web3`/`founder`/`paranoid` → `fail`.
+
+### Changed
+
+- The `check_ids` PROFILE_OVERRIDES validator now ignores comment lines, so override-table comments may contain quoted words without breaking CI.
+
+## [1.4.0] - 2026-05-26
+
+Shareable and longitudinal output, all opt-in. The default run stays read-only; the only write the tool ever performs is `--snapshot`, to its own data dir.
+
+### Added
+
+- **`--report md`** — render a shareable Markdown report (Executive Verdict + ranked Top risks with effort + full results table) instead of the terminal report. Honors `--redact`.
+- **`tools/render_report.py`** — a stdlib-only Python companion that turns a `--json` document into a self-contained HTML report (no external assets, no network, no dependencies). Keeps the core a single shell file; every dynamic value is HTML-escaped.
+- **`--snapshot`** — append a redacted JSON snapshot to `~/.mac-posture-audit/history/` (implies `--redact`, so stored history is safe to keep). The sole write the tool performs; documented as the one read-only exception.
+- **`--trend`** — read-only longitudinal view: compares the oldest and newest stored snapshot and reports which checks improved or regressed. No scan, no writes.
+- **`catalog/known-bad.txt`** — a maintained, separately-versioned exposure-catalog feed (starter + format/refresh/signing docs) for `--exposure-catalog`.
+
+### Changed
+
+- The JSON document is now assembled from a single full-row store, so `--snapshot` produces a complete document even from a text-mode run. `--json` output is unchanged.
+
+## [1.3.0] - 2026-05-26
+
+The "High-Value Mac Threat Model Update." mac-posture-audit stops being a flat checklist and becomes a decision artifact: every run now ends with a profile-aware **Executive Verdict** and a **Top risks to address** list ranked by what can actually hurt *this* user first — not scan order. Adds depth in the two highest-leverage areas (IDE malicious-repo defense, agent/MCP exposure) and three named attack-chain composites. 9 new check IDs (159 → 168); 29 sections. Read-only, single-file, bash 3.2, no-network-by-default invariants preserved. JSON additions are non-breaking (additive top-level fields).
+
+### Added — decision layer (flagship)
+
+- **Action-priority tiering** (`urgent` > `high` > `medium` > `low`). `urgent` = a `fail` on a high-blast row or a fully-assembled `chain.*`; `high` = any other `fail` or a profile-relevant `warn`; `medium` = an ordinary `warn`; `low` = optional/cosmetic hardening. An ordinary `fail` under `--profile normal` lands in `high`, never `urgent` — the report does not scream catastrophe.
+- **Executive Verdict** — a profile-aware, calm one-liner with an `Action priority:` level. Never panics when `fail == 0`: a clean baseline with concentrated risk (wallet + dev + backups on one machine) reads as control-plane concentration, not "compromised."
+- **"Top risks to address"** — replaces the flat fail→warn dump; rows are tier-prefixed and ordered by action priority, so wallet exposure and a missing recovery path rise above "firewall not in block-all mode."
+- **JSON**: new additive top-level fields `executive_verdict` (`profile`, `tier`, `text`, `top_counts`) and `top_risks` (ranked `{rank,id,status,tier,label,hint}`), plus `summary.total`. The per-row contract (`id`/`status`/`label`/`hint`) is unchanged.
+- **`--top N`** (default 7) caps the list; `--top 0` hides the list but keeps the verdict (`top_risks: []`).
+- **`--explain <id>`** prints the threat rationale + per-profile severity for one check and exits without scanning. Scoped to the high-value ids (chains, MCP, IDE trust, wallet isolation); unknown ids point at `docs/AGENTS.md`.
+
+### Added — IDE depth (Section 24)
+
+- **`ide.{vscode,cursor}.automatic_tasks`** — flags `task.allowAutomaticTasks: "on"`, the exact `tasks.json` `runOn:folderOpen` autorun used by Contagious-Interview repos. `warn`; `web3`/`developer`/`paranoid`/`founder` → `fail`.
+- **`ide.{vscode,cursor}.trusted_folders`** — best-effort trust-sprawl proxy (per-workspace storage dir count); `warn` above 25.
+
+### Added — agent/MCP depth (Section 28)
+
+- **`mcp.servers.launcher`** — informational classification of dynamic launchers (npx/uvx/bunx/pipx/docker). Not a failure on its own.
+- **`mcp.servers.filesystem_capable`** — hedged heuristic (`"appears filesystem-capable"`, never a capability proof) for the filesystem MCP server or broad path args. `warn`; `web3`/`developer`/`founder` → `fail`.
+
+### Added — Section 29: attack-chain composites
+
+Named cross-section composites that fire only when a full attack path is assembled (`warn` default, high-blast; `web3`/`founder` → `fail`; informational `skip` otherwise):
+
+- **`chain.fake_interview`** — IDE auto-runs untrusted code AND no sandbox runtime to contain it.
+- **`chain.wallet_drain`** — wallet present AND isolation missing AND no outbound monitor.
+- **`chain.agent_exposure`** — a filesystem/remote-capable MCP server on the same machine as a wallet.
+
+### Profile overrides (v1.3)
+
+New `PROFILE_OVERRIDES` entries for `ide.*.automatic_tasks` (web3/developer/paranoid/founder), `mcp.servers.filesystem_capable` (web3/developer/founder), and the three `chain.*` rows (web3/founder).
+
+### Tests
+
+- New `tests/sections/31_top_risks.bats` (tiering, verdict, ranked JSON helpers, `--top`/`--top 0`, golden output fixture, HIGH_BLAST/LOW_TIER id-resolution guard), `tests/sections/29_attack_chains.bats` (12 chain cases), and `tests/integration/decision_layer.bats` (real-run JSON contract + `--explain`). Section 24 and 28 suites extended for the new rows. 353 → 400 tests.
+
+### Notes
+
+- `_tier_of` matches `HIGH_BLAST_IDS` with a shell-glob helper (`ide.*.workspace_trust`, `chain.*`). The sandbox signal for `chain.fake_interview` is read from detection state, not `sandbox.runtime.present`'s status (which is always `skip`). No monetization language in the CLI — positioning stays in docs.
+
 ## [1.2.0] - 2026-05-25
 
 Inspired by [perplexityai/bumblebee](https://github.com/perplexityai/bumblebee)'s supply-chain inventory model. Adds three new sections (browser extension inventory, editor extension inventory, MCP server audit), a generic exposure-catalog framework for shipping deny-lists separately from the script, a `selftest` subcommand for post-deploy smoke checks, and a `--summary-line` mode for fleet log scraping. 8 new check IDs (151 → 159). Read-only and bash 3.2 invariants preserved throughout.

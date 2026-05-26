@@ -17,3 +17,6 @@ posture-*.txt
 *.backup
 *.backup-*
 *.bak
+
+# gstack local artifacts (security reports, etc.)
+.gstack/

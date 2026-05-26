@@ -8,11 +8,29 @@
   "macos": "string",        // sw_vers -productVersion, e.g. "26.4.1"
   "arch": "string",         // uname -m, e.g. "arm64" or "x86_64"
   "summary": {
-    "pass": 0,              // non-negative int; sum equals len(results)
+    "pass": 0,              // non-negative int; pass+warn+fail+skip == len(results)
     "warn": 0,
     "fail": 0,
-    "skip": 0
+    "skip": 0,
+    "total": 0             // added v1.3.0; equals len(results)
   },
+  "executive_verdict": {    // added v1.3.0 — profile-aware decision summary
+    "profile": "string",   // active --profile
+    "tier":    "urgent|high|medium|low|none",  // action priority (highest tier present)
+    "text":    "string",   // one-line human verdict
+    "top_counts": { "urgent": 0, "high": 0, "medium": 0, "low": 0 }
+  },
+  "top_risks": [            // added v1.3.0 — warn/fail rows ranked by action priority
+    {
+      "rank":   0,          // 1-based, contiguous, urgent→high→medium→low
+      "id":     "string",
+      "status": "warn|fail",
+      "tier":   "urgent|high|medium|low",
+      "effort": "low|medium|high",  // added v1.5.0 — remediation effort
+      "label":  "string",
+      "hint":   "string"
+    }
+  ],
   "results": [
     {
       "id":     "string",   // stable id, unique within a single run
@@ -31,6 +49,9 @@
 - **`results[].status`** — one of the four enum values. Profiles (see `--profile`) can rewrite a status from one enum value to another (e.g. `warn → fail` under `web3` for `ext.wallet`); they cannot introduce new statuses.
 - **`results[].label`** — opaque to consumers. Only `id` is stable; `label` may be reworded between versions.
 - **`results[].hint`** — may be empty (`""`) for `pass` and uninformative `skip` rows.
+- **`summary.total`** *(added v1.3.0)* — equals `len(results)` and the sum of the four counters.
+- **`executive_verdict`** *(added v1.3.0)* — `tier` is the action-priority level (the highest tier present in `top_risks`, or `none` when there are no warn/fail rows). `text` is opaque human prose (reworded freely across versions). `top_counts` sums the ranked tiers.
+- **`top_risks`** *(added v1.3.0)* — the warn/fail rows ranked by action priority; `rank` is 1-based and contiguous, ordered urgent→high→medium→low. Capped by `--top N` (default 7); `--top 0` yields `[]`. `pass`/`skip` rows never appear. Always an array, never absent. Each entry carries an **`effort`** *(added v1.5.0)* hint (`low`/`medium`/`high`) for impact-per-effort triage.
 
 ## ID grammar
 
