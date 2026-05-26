@@ -30,7 +30,7 @@
 # shellcheck disable=SC2088
 set -uo pipefail
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.5.0"
 
 # ── State ───────────────────────────────────────────────────────────────────
 PASS_N=0
@@ -39,6 +39,20 @@ FAIL_N=0
 SKIP_N=0
 declare -a RESULTS_PASS RESULTS_WARN RESULTS_FAIL RESULTS_SKIP
 declare -a JSON_ROWS
+
+# ── Risk-ranking state (v1.3) ───────────────────────────────────────────────
+# Parallel arrays — one entry per emitted warn/fail row — feed the profile-aware
+# "Top risks to address" ranking and the executive verdict. pass/skip rows are
+# never ranked, so they are not stored here. RANK_LABEL/RANK_HINT keep the raw
+# fields so the text renderer can format "label — hint" and the JSON top_risks
+# block can emit them as separate escaped strings.
+declare -a RANK_ID RANK_STATUS RANK_LABEL RANK_HINT
+
+# ── Full row store (v1.4) ───────────────────────────────────────────────────
+# Every emitted row (any status), in emission order, so the Markdown report
+# (--report md) can render the complete results table grouped by area without
+# re-parsing JSON. Cheap (~170 short strings); reset between runs in tests.
+declare -a ROW_ID ROW_STATUS ROW_LABEL ROW_HINT
 
 # ── Exposure catalog state ──────────────────────────────────────────────────
 # Parallel arrays — bash 3.2 has no associative arrays. Populated by
@@ -55,20 +69,29 @@ parse_args() {
   QUICK=false              # --quick: skip sudo-required checks
   NETWORK=false            # --network: allow external probes (default off)
   REDACT=false             # --redact: mask host/email/usernames/IPs/paths in output
-  PROFILE="normal"         # --profile: severity calibration (normal|web3|paranoid|developer|founder)
+  PROFILE="normal"         # --profile: severity calibration (normal|web3|paranoid|developer|founder|journalist)
+  PROFILE_AUTO=false       # --profile auto: detect signals, recommend a profile, and exit (advisory)
   DIFF_PATH=""             # --diff: compare current run against previous JSON
   EXPOSURE_CATALOG_PATH="" # --exposure-catalog: deny-list (line-based "category|name|severity[|id]")
   SUMMARY_LINE=false       # --summary-line: emit a machine-parseable one-line summary at end of run
   SELFTEST=false           # --selftest: run a minimal end-to-end smoke test against in-tree fixtures and exit
+  TOP_N=7                  # --top N: cap the "Top risks to address" list (0 = list off, verdict still shown)
+  REPORT_FORMAT=""         # --report md: render a shareable Markdown report instead of the terminal report
+  SNAPSHOT=false           # --snapshot: append a redacted JSON snapshot to the local history dir
+  TREND=false              # --trend: summarize how posture changed across stored snapshots
   expect_profile=false
   expect_diff=false
   expect_catalog=false
+  expect_top=false
+  expect_explain=false
+  expect_report=false
   for arg in "$@"; do
     if $expect_profile; then
       case "$arg" in
-      normal | web3 | paranoid | developer | founder) PROFILE="$arg" ;;
+      normal | web3 | paranoid | developer | founder | journalist) PROFILE="$arg" ;;
+      auto) PROFILE_AUTO=true ;;
       *)
-        echo "unknown profile: $arg (one of: normal, web3, paranoid, developer, founder)"
+        echo "unknown profile: $arg (one of: normal, web3, paranoid, developer, founder, journalist, auto)"
         exit 2
         ;;
       esac
@@ -93,6 +116,31 @@ parse_args() {
       expect_catalog=false
       continue
     fi
+    if $expect_top; then
+      case "$arg" in
+      '' | *[!0-9]*)
+        echo "--top requires a non-negative integer"
+        exit 2
+        ;;
+      esac
+      TOP_N="$arg"
+      expect_top=false
+      continue
+    fi
+    if $expect_explain; then
+      run_explain "$arg"
+    fi
+    if $expect_report; then
+      case "$arg" in
+      md | markdown) REPORT_FORMAT="md" ;;
+      *)
+        echo "--report supports: md (markdown). Got: $arg"
+        exit 2
+        ;;
+      esac
+      expect_report=false
+      continue
+    fi
     case "$arg" in
     --quick) QUICK=true ;;
     --json) MODE="json" ;;
@@ -100,14 +148,41 @@ parse_args() {
     --offline) NETWORK=false ;;
     --redact) REDACT=true ;;
     --summary-line) SUMMARY_LINE=true ;;
+    --top) expect_top=true ;;
+    --top=*)
+      arg="${arg#--top=}"
+      case "$arg" in
+      '' | *[!0-9]*)
+        echo "--top requires a non-negative integer"
+        exit 2
+        ;;
+      esac
+      TOP_N="$arg"
+      ;;
+    --explain) expect_explain=true ;;
+    --explain=*) run_explain "${arg#--explain=}" ;;
+    --report) expect_report=true ;;
+    --report=*)
+      arg="${arg#--report=}"
+      case "$arg" in
+      md | markdown) REPORT_FORMAT="md" ;;
+      *)
+        echo "--report supports: md (markdown). Got: $arg"
+        exit 2
+        ;;
+      esac
+      ;;
+    --snapshot) SNAPSHOT=true ;;
+    --trend) TREND=true ;;
     --selftest) SELFTEST=true ;;
     --profile) expect_profile=true ;;
     --profile=*)
       arg="${arg#--profile=}"
       case "$arg" in
-      normal | web3 | paranoid | developer | founder) PROFILE="$arg" ;;
+      normal | web3 | paranoid | developer | founder | journalist) PROFILE="$arg" ;;
+      auto) PROFILE_AUTO=true ;;
       *)
-        echo "unknown profile: $arg (one of: normal, web3, paranoid, developer, founder)"
+        echo "unknown profile: $arg (one of: normal, web3, paranoid, developer, founder, journalist, auto)"
         exit 2
         ;;
       esac
@@ -144,12 +219,13 @@ Flags (combinable):
   --redact                Mask hostname, email addresses, admin usernames, resolver IPs,
                           and $HOME paths in output. Use this when sharing the report.
   --profile NAME          Severity profile. One of: normal (default), web3, paranoid,
-                          developer, founder. Escalates specific checks based on
-                          threat model (e.g. wallet-on-main-user is warn under
-                          normal, fail under web3 / paranoid). The 'founder'
-                          profile is the union of developer + web3 escalations
-                          for solo founders shipping their own code who also
-                          custody crypto.
+                          developer, founder, journalist. Escalates specific checks
+                          based on threat model (e.g. wallet-on-main-user is warn
+                          under normal, fail under web3 / paranoid). 'founder' is the
+                          union of developer + web3; 'journalist' hardens the
+                          surveillance surface (Lockdown Mode, RF, telemetry, remote
+                          access). Use '--profile auto' to detect signals and get a
+                          recommended profile, then exit (advisory, no scan).
   --diff PATH             Compare current run against a previously saved
                           --json output. Prints one line per id whose status
                           differs. Implies --json (run is collected internally).
@@ -166,6 +242,20 @@ Flags (combinable):
                           output), print one extra machine-parseable line:
                           mac-posture-audit summary version=… profile=… …
                           For shell scripts that just need pass/warn/fail counts.
+  --top N                 Cap the "Top risks to address" list to N items
+                          (default 7). --top 0 hides the list but still prints
+                          the Executive Verdict and Action priority.
+  --explain ID            Print the threat rationale and per-profile severity
+                          for one check id (e.g. chain.fake_interview) and exit
+                          without scanning. Covers the high-value v1.3 checks.
+  --report md             Render a shareable Markdown report (Executive Verdict
+                          + Top risks + full results table) instead of the
+                          terminal report. Honors --redact.
+  --snapshot              Append a redacted JSON snapshot to
+                          ~/.mac-posture-audit/history/ (implies --redact). The
+                          only write the tool performs; default runs are read-only.
+  --trend                 Read-only: summarize how posture changed across stored
+                          snapshots (oldest vs newest). No scan, no writes.
   --selftest              Run a minimal end-to-end smoke test (no real host
                           state inspected, no disk writes) and exit. A
                           non-zero exit means this build no longer detects
@@ -182,7 +272,7 @@ USAGE
     esac
   done
   if $expect_profile; then
-    echo "--profile requires a value (one of: normal, web3, paranoid, developer, founder)"
+    echo "--profile requires a value (one of: normal, web3, paranoid, developer, founder, journalist, auto)"
     exit 2
   fi
   if $expect_diff; then
@@ -191,6 +281,14 @@ USAGE
   fi
   if $expect_catalog; then
     echo "--exposure-catalog requires a path"
+    exit 2
+  fi
+  if $expect_explain; then
+    echo "--explain requires a check id (e.g. --explain chain.fake_interview)"
+    exit 2
+  fi
+  if $expect_report; then
+    echo "--report requires a format (md)"
     exit 2
   fi
 
@@ -203,6 +301,11 @@ USAGE
     MODE="json"
   fi
 
+  # --report md collects silently (suppress per-row text + banners) then renders
+  # Markdown at the end; emit_summary checks REPORT_FORMAT before the json branch.
+  [[ -n "$REPORT_FORMAT" ]] && MODE="json"
+  # --snapshot stores a redacted JSON (safe-to-keep history); it implies --redact.
+  $SNAPSHOT && REDACT=true
 }
 
 detect_runtime() {
@@ -352,6 +455,53 @@ PROFILE_OVERRIDES=(
   "paranoid|mcp.servers.unpinned|warn|fail"
   "founder|mcp.servers.remote_http|warn|fail"
   "founder|mcp.servers.unpinned|warn|fail"
+  # v1.3 — filesystem-capable MCP launchers. Common and sometimes intentional,
+  # so warn by default; the profiles that custody crypto or ship code treat a
+  # broad agent filesystem grant as a fail.
+  "web3|mcp.servers.filesystem_capable|warn|fail"
+  "developer|mcp.servers.filesystem_capable|warn|fail"
+  "founder|mcp.servers.filesystem_capable|warn|fail"
+  # v1.3 — IDE folder-open autorun (task.allowAutomaticTasks set to on). Same
+  # malicious-repo threat as workspace-trust-off; escalate to fail for the
+  # profiles that clone untrusted code or custody crypto.
+  "web3|ide.vscode.automatic_tasks|warn|fail"
+  "web3|ide.cursor.automatic_tasks|warn|fail"
+  "developer|ide.vscode.automatic_tasks|warn|fail"
+  "developer|ide.cursor.automatic_tasks|warn|fail"
+  "paranoid|ide.vscode.automatic_tasks|warn|fail"
+  "paranoid|ide.cursor.automatic_tasks|warn|fail"
+  "founder|ide.vscode.automatic_tasks|warn|fail"
+  "founder|ide.cursor.automatic_tasks|warn|fail"
+  # v1.3 — named attack chains. Default warn (so they tier as `high` via the
+  # chain.* high-blast glob); web3/founder treat a fully-assembled chain as fail.
+  "web3|chain.fake_interview|warn|fail"
+  "web3|chain.wallet_drain|warn|fail"
+  "web3|chain.agent_exposure|warn|fail"
+  "founder|chain.fake_interview|warn|fail"
+  "founder|chain.wallet_drain|warn|fail"
+  "founder|chain.agent_exposure|warn|fail"
+  "web3|chain.cloud_exfil|warn|fail"
+  "founder|chain.cloud_exfil|warn|fail"
+  "paranoid|chain.cloud_exfil|warn|fail"
+  # journalist / activist — nation-state spyware threat model. Lockdown Mode
+  # flips from skip (fine for typical users) to a surfaced gap, and the
+  # surveillance surface hardens: RF (Bluetooth/AirDrop), telemetry, remote
+  # access, browser debugging, VPN killswitch, and stale software all fail.
+  # Deliberately NOT crypto/supply-chain focused (that is web3/developer).
+  "journalist|privacy.lockdown.on|skip|warn"
+  "journalist|network.bluetooth.off|warn|fail"
+  "journalist|network.airdrop.discoverable|warn|fail"
+  "journalist|privacy.ads.off|warn|fail"
+  "journalist|privacy.diagnostics.off|warn|fail"
+  "journalist|network.firewall.stealth|warn|fail"
+  "journalist|network.firewall.blockall|warn|fail"
+  "journalist|apps.remote_access.present|warn|fail"
+  "journalist|browser.remote_debugging|warn|fail"
+  "journalist|browser.password_autofill|skip|warn"
+  "journalist|browser.version_currency|warn|fail"
+  "journalist|network.vpn.killswitch|warn|fail"
+  "journalist|update.macos.recency|warn|fail"
+  "journalist|update.auto|warn|fail"
 )
 
 # Apply the profile severity table to a (status, id) pair. Returns the
@@ -371,6 +521,99 @@ _apply_profile() {
     fi
   done
   printf '%s' "$status"
+}
+
+# ── Risk tiering (v1.3) ─────────────────────────────────────────────────────
+# Action-priority tiers for the "Top risks to address" ranking and the
+# executive verdict. Tiers reflect ACTION PRIORITY, not danger theater:
+#   urgent  fail on a high-blast row or a named attack chain (chain.*)
+#   high    any other fail, or a profile-relevant warn
+#   medium  an ordinary warn
+#   low     an optional / cosmetic hardening warn
+# An ordinary fail under --profile=normal lands in `high`, never `urgent`, so a
+# clean baseline never screams catastrophe.
+
+# Genuinely catastrophic-when-failing ids. Supports shell-style globs (matched
+# by _id_matches_pattern), so "ide.*.workspace_trust" and "chain.*" work. Every
+# literal id here must exist in tests/fixtures/expected_ids.txt; a CI test
+# asserts each entry resolves to a known id or a documented glob.
+HIGH_BLAST_IDS="ext.wallet ssh.keys.unencrypted system.theft_resistance mcp.servers.remote_http ide.*.workspace_trust ide.*.automatic_tasks chain.*"
+
+# Optional / cosmetic hardening — a warn on one of these is `low`, not `medium`.
+LOW_TIER_IDS="network.firewall.blockall network.firewall.stealth folder.downloads.stale"
+
+# Remediation effort (v1.5) — pairs with the tier so the user can spot
+# high-impact / low-effort "fix these first" wins. low = flip a setting / pin a
+# version / toggle; high = structural work (new user account, migrate a wallet,
+# stand up backups, re-key SSH, move sensitive dirs, encrypt the disk, or
+# dismantle a multi-step chain). Everything else is medium. Globs supported.
+EFFORT_LOW_IDS="network.firewall.blockall network.firewall.stealth network.bluetooth.off network.airdrop.discoverable folder.downloads.stale privacy.lockdown.on privacy.ads.off privacy.diagnostics.off update.auto browser.password_autofill browser.remote_debugging ide.*.workspace_trust ide.*.automatic_tasks mcp.servers.unpinned"
+EFFORT_HIGH_IDS="ext.wallet ssh.keys.unencrypted system.filevault.on system.theft_resistance backup.recovery_path backup.offsite users.crypto_isolation_indicator data.ssh.cloud_sync_exposure data.crypto.cloud_sync_exposure data.dotfiles.cloud_sync_exposure chain.*"
+
+# _id_matches_pattern ID PATTERN_SET — true if ID matches any space-separated
+# pattern in PATTERN_SET. Patterns are unquoted in [[ == ]] so shell globs
+# (ide.*.workspace_trust, chain.*) match; exact ids match literally.
+_id_matches_pattern() {
+  local id="$1" set="$2" p
+  [[ -z "$id" ]] && return 1
+  for p in $set; do
+    # shellcheck disable=SC2053  # intentional glob match, not literal compare
+    [[ "$id" == $p ]] && return 0
+  done
+  return 1
+}
+
+# _profile_escalates_id PROFILE ID — true if the active profile has an override
+# entry for ID. The override table is escalate-only by construction, so
+# membership means "this profile cares enough to raise this id's severity."
+_profile_escalates_id() {
+  local profile="$1" id="$2" entry
+  [[ -z "$id" || "$profile" == "normal" ]] && return 1
+  local prefix="${profile}|${id}|"
+  for entry in "${PROFILE_OVERRIDES[@]}"; do
+    [[ "$entry" == "$prefix"* ]] && return 0
+  done
+  return 1
+}
+
+# _tier_of ID STATUS — prints the action-priority tier (urgent|high|medium|low)
+# for a warn/fail row, or empty for pass/skip.
+_tier_of() {
+  local id="$1" status="$2" high_blast=false relevant=false hygiene=false
+  if _id_matches_pattern "$id" "$HIGH_BLAST_IDS"; then
+    high_blast=true
+    relevant=true
+  fi
+  _profile_escalates_id "${PROFILE:-normal}" "$id" && relevant=true
+  _id_matches_pattern "$id" "$LOW_TIER_IDS" && hygiene=true
+  case "$status" in
+  fail)
+    if $high_blast; then printf 'urgent'; else printf 'high'; fi
+    ;;
+  warn)
+    if $relevant; then
+      printf 'high'
+    elif $hygiene; then
+      printf 'low'
+    else
+      printf 'medium'
+    fi
+    ;;
+  *) printf '' ;;
+  esac
+}
+
+# _effort_of ID — prints the remediation effort (low|medium|high) for ranking
+# "fix these first" by impact-per-effort. high takes precedence over low.
+_effort_of() {
+  local id="$1"
+  if _id_matches_pattern "$id" "$EFFORT_HIGH_IDS"; then
+    printf 'high'
+  elif _id_matches_pattern "$id" "$EFFORT_LOW_IDS"; then
+    printf 'low'
+  else
+    printf 'medium'
+  fi
 }
 
 # ── Exposure catalog (deny-list) loader ─────────────────────────────────────
@@ -535,6 +778,12 @@ _record() {
   # report actually showed.
   [[ -n "$id" ]] && STATUS_BY_ID="$STATUS_BY_ID$id=$status "
 
+  # Full row store (every status) for the Markdown report renderer.
+  ROW_ID+=("$id")
+  ROW_STATUS+=("$status")
+  ROW_LABEL+=("$label")
+  ROW_HINT+=("$hint")
+
   # 1. Always increment counters first — JSON mode used to skip these.
   case "$status" in
   pass)
@@ -544,10 +793,18 @@ _record() {
   warn)
     WARN_N=$((WARN_N + 1))
     RESULTS_WARN+=("$label — $hint")
+    RANK_ID+=("$id")
+    RANK_STATUS+=("$status")
+    RANK_LABEL+=("$label")
+    RANK_HINT+=("$hint")
     ;;
   fail)
     FAIL_N=$((FAIL_N + 1))
     RESULTS_FAIL+=("$label — $hint")
+    RANK_ID+=("$id")
+    RANK_STATUS+=("$status")
+    RANK_LABEL+=("$label")
+    RANK_HINT+=("$hint")
     ;;
   skip)
     SKIP_N=$((SKIP_N + 1))
@@ -4403,6 +4660,68 @@ section_24_ide_trust() {
     fi
   }
 
+  # _check_ide_automatic_tasks LABEL ID SETTINGS_FILE APP_BUNDLE
+  # task.allowAutomaticTasks:"on" makes a folder's .vscode/tasks.json with
+  # runOptions.runOn:"folderOpen" execute the moment the folder is opened —
+  # the exact mechanism used by Contagious-Interview repos. Default is "auto"
+  # (prompt). Emits warn by default; web3/developer/founder/paranoid escalate
+  # to fail via PROFILE_OVERRIDES.
+  _check_ide_automatic_tasks() {
+    local label="$1" id="$2" settings_file="$3" bundle="$4"
+    local app_present=false app_root
+    for app_root in ${IDE_APP_ROOTS[@]+"${IDE_APP_ROOTS[@]}"}; do
+      if [[ -d "$app_root/$bundle" ]]; then
+        app_present=true
+        break
+      fi
+    done
+    if [[ ! -f "$settings_file" && "$app_present" == "false" ]]; then
+      skip "$label automatic-tasks not detected (no settings file, no app bundle)" "" "$id"
+      return
+    fi
+    if [[ ! -f "$settings_file" ]]; then
+      pass "$label: automatic tasks at default (folder-open tasks prompt first)" "$id"
+      return
+    fi
+    if grep -qE '"task\.allowAutomaticTasks"[[:space:]]*:[[:space:]]*"on"' "$settings_file" 2>/dev/null; then
+      warn "$label auto-runs tasks.json on folder open (task.allowAutomaticTasks: on)" "A malicious repo's .vscode/tasks.json with runOn:folderOpen executes the instant you open the folder. Set task.allowAutomaticTasks to 'auto' (default) or 'off'." "$id"
+    else
+      pass "$label: automatic tasks not forced on (folder-open tasks still prompt)" "$id"
+    fi
+  }
+
+  # _check_ide_trusted_folders LABEL ID WORKSPACE_STORAGE APP_BUNDLE
+  # Best-effort trust-sprawl proxy: counts per-workspace storage dirs. Each
+  # folder the user opened (and likely "Trusted") is a standing workspace-trust
+  # bypass. The real trusted-folder list lives in an internal sqlite store
+  # whose schema is unstable, so the directory count is a documented proxy.
+  _check_ide_trusted_folders() {
+    local label="$1" id="$2" wsstorage="$3" bundle="$4"
+    local app_present=false app_root
+    for app_root in ${IDE_APP_ROOTS[@]+"${IDE_APP_ROOTS[@]}"}; do
+      if [[ -d "$app_root/$bundle" ]]; then
+        app_present=true
+        break
+      fi
+    done
+    if [[ ! -d "$wsstorage" && "$app_present" == "false" ]]; then
+      skip "$label workspace count not detected (no workspace storage, no app bundle)" "" "$id"
+      return
+    fi
+    if [[ ! -d "$wsstorage" ]]; then
+      skip "$label: no workspaces opened yet" "" "$id"
+      return
+    fi
+    local count
+    count=$(find "$wsstorage" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')
+    [[ -z "$count" ]] && count=0
+    if [[ "$count" -gt 25 ]]; then
+      warn "$label has opened $count workspaces (trust-sprawl proxy)" "Each folder you 'Trust' is a standing workspace-trust bypass. Periodically clear stale trusted folders so a long-forgotten 'Trust' doesn't cover a freshly cloned repo." "$id"
+    else
+      pass "$label workspace count modest ($count, proxy for trusted folders)" "$id"
+    fi
+  }
+
   _check_ide_trust \
     "VS Code" \
     "ide.vscode.workspace_trust" \
@@ -4413,6 +4732,30 @@ section_24_ide_trust() {
     "Cursor" \
     "ide.cursor.workspace_trust" \
     "$HOME/Library/Application Support/Cursor/User/settings.json" \
+    "Cursor.app"
+
+  _check_ide_automatic_tasks \
+    "VS Code" \
+    "ide.vscode.automatic_tasks" \
+    "$HOME/Library/Application Support/Code/User/settings.json" \
+    "Visual Studio Code.app"
+
+  _check_ide_automatic_tasks \
+    "Cursor" \
+    "ide.cursor.automatic_tasks" \
+    "$HOME/Library/Application Support/Cursor/User/settings.json" \
+    "Cursor.app"
+
+  _check_ide_trusted_folders \
+    "VS Code" \
+    "ide.vscode.trusted_folders" \
+    "$HOME/Library/Application Support/Code/User/workspaceStorage" \
+    "Visual Studio Code.app"
+
+  _check_ide_trusted_folders \
+    "Cursor" \
+    "ide.cursor.trusted_folders" \
+    "$HOME/Library/Application Support/Cursor/User/workspaceStorage" \
     "Cursor.app"
 
   # users.crypto_isolation_indicator — cross-section composite.
@@ -4811,13 +5154,13 @@ _check_mcp_servers() {
     fi
   fi
 
-  local total=0 unpinned=0 remote=0 suspicious_count=0 fail_count=0
+  local total=0 unpinned=0 remote=0 launcher=0 fscap=0 suspicious_count=0 fail_count=0
   local any_config_found=false
   local -a server_ids suspicious_hits
   server_ids=()
   suspicious_hits=()
 
-  local cfg flat envelope_inner ids sid upcount has_docker rcount
+  local cfg flat envelope_inner ids sid upcount has_docker rcount lcount fscount
   for cfg in ${mcp_paths[@]+"${mcp_paths[@]}"}; do
     [[ -f "$cfg" ]] || continue
     any_config_found=true
@@ -4875,6 +5218,20 @@ _check_mcp_servers() {
     rcount=$(printf '%s' "$flat" | grep -oE '"(url|httpUrl|serverUrl)"[[:space:]]*:[[:space:]]*"https?://' 2>/dev/null | wc -l | tr -d '[:space:]' || true)
     [[ -z "$rcount" ]] && rcount=0
     remote=$((remote + rcount))
+
+    # Dynamic launchers (npx/uvx/bunx/pipx/docker/podman) — informational only.
+    # Dynamic launch is not a failure on its own; the sharp failures are
+    # unpinned (above) and remote (above).
+    lcount=$(printf '%s' "$flat" | grep -oE '"command"[[:space:]]*:[[:space:]]*"(npx|uvx|bunx|pipx|docker|podman)"' 2>/dev/null | wc -l | tr -d '[:space:]' || true)
+    [[ -z "$lcount" ]] && lcount=0
+    launcher=$((launcher + lcount))
+
+    # Filesystem-capable launchers — a HEURISTIC, never a capability proof:
+    # the canonical filesystem MCP server, or args that hand a server a broad
+    # path ("/Users…", "/home…", "$HOME", "~/"). Label stays hedged.
+    fscount=$(printf '%s' "$flat" | grep -oE 'server-filesystem|"/Users/|"/home/|"\$HOME|"~/' 2>/dev/null | wc -l | tr -d '[:space:]' || true)
+    [[ -z "$fscount" ]] && fscount=0
+    fscap=$((fscap + fscount))
   done
 
   # Catalog matching on server IDs.
@@ -4894,6 +5251,8 @@ _check_mcp_servers() {
     skip "No MCP config files found (no Cursor/Claude/Windsurf/Gemini configs detected)" "" "mcp.servers.count"
     skip "No MCP config files found" "" "mcp.servers.unpinned"
     skip "No MCP config files found" "" "mcp.servers.remote_http"
+    skip "No MCP config files found" "" "mcp.servers.launcher"
+    skip "No MCP config files found" "" "mcp.servers.filesystem_capable"
     skip "No MCP config files found" "" "mcp.servers.suspicious"
     return
   fi
@@ -4914,6 +5273,22 @@ _check_mcp_servers() {
     pass "No MCP servers configured via remote HTTP/SSE transports" "mcp.servers.remote_http"
   else
     warn "$remote MCP server(s) configured via remote HTTP/SSE endpoints" "Remote MCP transports send tool calls (and tool-call results, which may include file contents) to a third-party server. Treat the operator as a privileged third party. For web3 / wallet-related work, prefer local stdio MCP servers." "mcp.servers.remote_http"
+  fi
+
+  # Dynamic launchers — informational (skip), matching the sandbox.runtime
+  # pattern. Never a failure on its own; pairs with mcp.servers.unpinned.
+  if [[ "$launcher" -eq 0 ]]; then
+    skip "No MCP servers use dynamic launchers (npx/uvx/bunx/pipx/docker)" "" "mcp.servers.launcher"
+  else
+    skip "$launcher MCP server(s) use dynamic launchers (npx/uvx/bunx/pipx/docker)" "Dynamic launchers fetch and run code at host startup. Not a failure on its own — pair with pinning (mcp.servers.unpinned) and prefer exact versions or image digests." "mcp.servers.launcher"
+  fi
+
+  # Filesystem-capable launchers — hedged label; this is a grep heuristic,
+  # not a capability proof. Default warn; web3/developer/founder escalate.
+  if [[ "$fscap" -eq 0 ]]; then
+    pass "No MCP servers appear filesystem-capable" "mcp.servers.filesystem_capable"
+  else
+    warn "MCP server launcher(s) appear filesystem-capable" "Review configured MCP servers; avoid broad filesystem grants for agent tools. An agent with filesystem reach can read SSH keys, cloud creds, and wallet data." "mcp.servers.filesystem_capable"
   fi
 
   if ! $CATALOG_LOADED; then
@@ -4972,6 +5347,95 @@ section_28_mcp_servers() {
   _check_mcp_servers
 }
 
+# _sandbox_available — true if a sandbox runtime (Docker/OrbStack/UTM/…) was
+# detected in section 22. The sandbox.runtime.present row is always `skip`
+# (present AND absent), so chains must read SANDBOX_FOUND, never the status.
+# Guards against set -u when called before section 22 (e.g. unit tests).
+_sandbox_available() {
+  [[ -n "${SANDBOX_FOUND+set}" ]] || return 1
+  [[ ${#SANDBOX_FOUND[@]} -gt 0 ]]
+}
+
+_check_attack_chains() {
+  # Named cross-section composites — they crystallize the prose chains in
+  # docs/AGENTS.md §3 into single rows. Each reads constituent statuses via
+  # _status_of (post-profile) and is deliberately mechanical (no synthetic
+  # signals). Default warn; web3/founder escalate to fail via PROFILE_OVERRIDES.
+  # When a chain is not present it emits an informational skip (never ranked).
+  local vstrust ctrust vtasks ctasks wallet iso outbound mcp_remote mcp_fs
+
+  # chain.fake_interview — (IDE workspace trust loose OR automatic tasks on)
+  # AND no sandbox available. Remote-access apps are an amplifier documented in
+  # AGENTS, deliberately NOT in the chain logic (keeps it crisp, not brittle).
+  vstrust=$(_status_of ide.vscode.workspace_trust)
+  ctrust=$(_status_of ide.cursor.workspace_trust)
+  vtasks=$(_status_of ide.vscode.automatic_tasks)
+  ctasks=$(_status_of ide.cursor.automatic_tasks)
+  local ide_loose=false
+  case " $vstrust $ctrust $vtasks $ctasks " in
+  *" warn "* | *" fail "*) ide_loose=true ;;
+  esac
+  if [[ "$ide_loose" == "true" ]] && ! _sandbox_available; then
+    warn "Fake-interview chain: IDE auto-runs untrusted code AND no sandbox to contain it" "The Contagious-Interview pattern: a 'take-home' repo opens in your IDE and runs tasks.json/scripts on a host with no disposable VM. Re-enable workspace trust (and set task.allowAutomaticTasks to auto), and install OrbStack/UTM to run unknown repos in a throwaway environment." "chain.fake_interview"
+  else
+    skip "Fake-interview chain not present (IDE trust intact, or a sandbox is available)" "" "chain.fake_interview"
+  fi
+
+  # chain.wallet_drain — wallet extension present AND crypto isolation missing
+  # AND no outbound monitor. crypto_isolation_indicator PASSES when isolation is
+  # healthy, so the chain keys on warn/fail (isolation missing), never presence.
+  wallet=$(_status_of ext.wallet)
+  iso=$(_status_of users.crypto_isolation_indicator)
+  outbound=$(_status_of network.outboundmonitor.running)
+  if [[ "$wallet" == "warn" || "$wallet" == "fail" ]] &&
+    [[ "$iso" == "warn" || "$iso" == "fail" ]] &&
+    [[ "$outbound" != "pass" ]]; then
+    warn "Wallet-drain chain: wallet in the daily browser, no workflow isolation, no outbound monitor" "A malicious dApp signature or drainer extension can move funds and nothing flags the exfiltration. Isolate the wallet (separate macOS user or browser profile) and install LuLu / Little Snitch so unfamiliar outbound connections prompt." "chain.wallet_drain"
+  else
+    skip "Wallet-drain chain not present (no wallet, isolation healthy, or an outbound monitor is running)" "" "chain.wallet_drain"
+  fi
+
+  # chain.agent_exposure — MCP present AND (filesystem-capable OR remote
+  # transport) AND a wallet on the same machine.
+  mcp_remote=$(_status_of mcp.servers.remote_http)
+  mcp_fs=$(_status_of mcp.servers.filesystem_capable)
+  local mcp_reach=false
+  [[ "$mcp_remote" == "warn" || "$mcp_remote" == "fail" ]] && mcp_reach=true
+  [[ "$mcp_fs" == "warn" || "$mcp_fs" == "fail" ]] && mcp_reach=true
+  if [[ "$mcp_reach" == "true" && ("$wallet" == "warn" || "$wallet" == "fail") ]]; then
+    warn "Agent-exposure chain: an MCP agent can reach files/network AND a wallet is present" "An MCP server with filesystem or remote-HTTP reach runs with your host's access while a wallet lives on the same machine. Scope MCP servers to least privilege, prefer local stdio, and keep wallet operations on an isolated user / profile." "chain.agent_exposure"
+  else
+    skip "Agent-exposure chain not present (no reaching MCP server, or no wallet detected)" "" "chain.agent_exposure"
+  fi
+
+  # chain.cloud_exfil — sensitive directories (SSH keys / wallet data / dotfiles)
+  # under a cloud-sync root. Crystallizes the per-domain data.*.cloud_sync_exposure
+  # rows into one "your home is layered over cloud sync" verdict (AGENTS §3.13).
+  local css cdc cdd
+  css=$(_status_of data.ssh.cloud_sync_exposure)
+  cdc=$(_status_of data.crypto.cloud_sync_exposure)
+  cdd=$(_status_of data.dotfiles.cloud_sync_exposure)
+  case " $css $cdc $cdd " in
+  *" warn "* | *" fail "*)
+    warn "Cloud-exfil chain: sensitive directories sit under a cloud-sync root" "SSH keys, wallet data, or dotfiles replicate to the provider and every other signed-in device. Move the affected directories out of the cloud-sync tree (see the data.*.cloud_sync_exposure rows)." "chain.cloud_exfil"
+    ;;
+  *)
+    skip "Cloud-exfil chain not present (no sensitive dirs under a cloud-sync root)" "" "chain.cloud_exfil"
+    ;;
+  esac
+}
+
+section_29_attack_chains() {
+  # ═════════════════════════════════════════════════════════════════════════════
+  # 29 · Attack-Chain Composites
+  # ═════════════════════════════════════════════════════════════════════════════
+  # These run last because they read constituent rows from many earlier
+  # sections (IDE trust §24, sandbox §22, wallet §9/10, crypto isolation §24,
+  # outbound monitor §06, MCP §28).
+  section "29 · Attack-Chain Composites"
+  _check_attack_chains
+}
+
 run_all_sections() {
   section_01_system_integrity
   section_02_login_lock
@@ -5001,6 +5465,7 @@ run_all_sections() {
   section_26_browser_extension_inventory
   section_27_editor_extension_inventory
   section_28_mcp_servers
+  section_29_attack_chains
 }
 
 _diff_parse_rows() {
@@ -5105,6 +5570,312 @@ emit_diff() {
   exit 1
 }
 
+# _compute_tiers — tally RANK_* rows into TIER_{URGENT,HIGH,MEDIUM,LOW}_N and
+# set OVERALL_PRIORITY (highest tier present, else "none"). Shared by the text
+# decision layer and the JSON emitter.
+_compute_tiers() {
+  TIER_URGENT_N=0
+  TIER_HIGH_N=0
+  TIER_MEDIUM_N=0
+  TIER_LOW_N=0
+  local i n="${#RANK_ID[@]}" t
+  for ((i = 0; i < n; i++)); do
+    t=$(_tier_of "${RANK_ID[$i]}" "${RANK_STATUS[$i]}")
+    case "$t" in
+    urgent) TIER_URGENT_N=$((TIER_URGENT_N + 1)) ;;
+    high) TIER_HIGH_N=$((TIER_HIGH_N + 1)) ;;
+    medium) TIER_MEDIUM_N=$((TIER_MEDIUM_N + 1)) ;;
+    low) TIER_LOW_N=$((TIER_LOW_N + 1)) ;;
+    esac
+  done
+  if [[ "$TIER_URGENT_N" -gt 0 ]]; then
+    OVERALL_PRIORITY="urgent"
+  elif [[ "$TIER_HIGH_N" -gt 0 ]]; then
+    OVERALL_PRIORITY="high"
+  elif [[ "$TIER_MEDIUM_N" -gt 0 ]]; then
+    OVERALL_PRIORITY="medium"
+  elif [[ "$TIER_LOW_N" -gt 0 ]]; then
+    OVERALL_PRIORITY="low"
+  else
+    OVERALL_PRIORITY="none"
+  fi
+}
+
+# _verdict_note — prints the profile-aware verdict sentence (no markup). Reads
+# OVERALL_PRIORITY, so _compute_tiers must run first. Never panics at fail==0.
+_verdict_note() {
+  local note="" wstat
+  case "$PROFILE" in
+  web3 | founder)
+    wstat=$(_status_of ext.wallet)
+    if [[ "$wstat" == "warn" || "$wstat" == "fail" ]]; then
+      note="For a $PROFILE Mac the main residual risk is control-plane concentration — wallet, browser state, dev tools, and backups live on one machine. Fix wallet isolation and recovery before cosmetic hardening."
+    fi
+    ;;
+  esac
+  if [[ -z "$note" ]]; then
+    case "$OVERALL_PRIORITY" in
+    none) note="No outstanding risks for the $PROFILE profile." ;;
+    urgent) note="Address the urgent item(s) first — these are the configurations most likely to be exploited." ;;
+    high) note="Several profile-relevant gaps remain — work the high-priority items first." ;;
+    *) note="Mostly optional hardening remains." ;;
+    esac
+  fi
+  printf '%s' "$note"
+}
+
+# _build_top_risks_json — prints the comma-joined JSON objects for the ranked
+# top_risks array body (no surrounding brackets). Empty when --top 0 or when no
+# warn/fail rows exist. Ordered urgent→high→medium→low, stable within tier.
+_build_top_risks_json() {
+  [[ "$TOP_N" -eq 0 ]] && return
+  local n="${#RANK_ID[@]}" shown=0 tier idx t out="" eid elabel ehint eff
+  for tier in urgent high medium low; do
+    for ((idx = 0; idx < n; idx++)); do
+      t=$(_tier_of "${RANK_ID[$idx]}" "${RANK_STATUS[$idx]}")
+      [[ "$t" == "$tier" ]] || continue
+      shown=$((shown + 1))
+      [[ "$shown" -gt "$TOP_N" ]] && {
+        printf '%s' "$out"
+        return
+      }
+      eid=$(_json_escape "${RANK_ID[$idx]}")
+      elabel=$(_json_escape "${RANK_LABEL[$idx]}")
+      ehint=$(_json_escape "${RANK_HINT[$idx]}")
+      eff=$(_effort_of "${RANK_ID[$idx]}")
+      [[ -n "$out" ]] && out="$out,"
+      out="$out{\"rank\":$shown,\"id\":\"$eid\",\"status\":\"${RANK_STATUS[$idx]}\",\"tier\":\"$tier\",\"effort\":\"$eff\",\"label\":\"$elabel\",\"hint\":\"$ehint\"}"
+    done
+  done
+  printf '%s' "$out"
+}
+
+emit_decision_layer() {
+  # v1.3 text-mode decision layer: executive verdict + profile-aware,
+  # action-priority-ranked "Top risks to address" list. Additive — printed
+  # after the flat Summary counts, never replacing them. (JSON mode surfaces
+  # the same data via top-level executive_verdict / top_risks fields.)
+  _compute_tiers
+  local n="${#RANK_ID[@]}"
+
+  local baseline
+  if [[ "$FAIL_N" -eq 0 ]]; then
+    baseline="Strong baseline: $PASS_N pass, 0 fail."
+  else
+    baseline="$PASS_N pass, $FAIL_N fail."
+  fi
+
+  echo
+  printf "%s━━━ Executive Verdict ━━━%s\n" "$BOLD" "$NC"
+  printf "  Profile: %s\n" "$PROFILE"
+  printf "  %s\n" "$baseline"
+  printf "  %s\n" "$(_verdict_note)"
+  printf "  %sAction priority: %s%s\n" "$BOLD" "$OVERALL_PRIORITY" "$NC"
+
+  # Top risks list — ordered urgent→high→medium→low, stable within tier.
+  # --top 0 disables the list (the verdict above still shows).
+  [[ "$TOP_N" -eq 0 || "$n" -eq 0 ]] && return
+  echo
+  printf "%sTop risks to address:%s\n" "$BOLD" "$NC"
+  local shown=0 idx t c line eff
+  for tier in urgent high medium low; do
+    for ((idx = 0; idx < n; idx++)); do
+      t=$(_tier_of "${RANK_ID[$idx]}" "${RANK_STATUS[$idx]}")
+      [[ "$t" == "$tier" ]] || continue
+      shown=$((shown + 1))
+      [[ "$shown" -gt "$TOP_N" ]] && return
+      case "$tier" in
+      urgent | high) c="$RED" ;;
+      medium) c="$YELLOW" ;;
+      *) c="$DIM" ;;
+      esac
+      if [[ -n "${RANK_HINT[$idx]}" ]]; then
+        line="${RANK_LABEL[$idx]} — ${RANK_HINT[$idx]}"
+      else
+        line="${RANK_LABEL[$idx]}"
+      fi
+      eff=$(_effort_of "${RANK_ID[$idx]}")
+      printf "  %d. %s[%s · %s effort]%s %s\n" "$shown" "$c" "$tier" "$eff" "$NC" "$line"
+    done
+  done
+}
+
+# _status_rank STATUS — severity ordering for trend direction (pass/skip=0).
+_status_rank() {
+  case "$1" in
+  fail) printf '2' ;;
+  warn) printf '1' ;;
+  *) printf '0' ;;
+  esac
+}
+
+# _md_cell STR — make a string safe inside a Markdown table cell.
+_md_cell() {
+  local s="$1"
+  s=${s//|/\\|}
+  s=${s//$'\n'/ }
+  printf '%s' "$s"
+}
+
+# _build_json_document — print the full JSON document. Built from ROW_* (the
+# full row store) so it is identical in --json and text modes; that lets
+# --snapshot write a complete JSON document even from a text-mode run.
+_build_json_document() {
+  local JSON_BODY="" JSON_HOST JSON_MACOS JSON_ARCH JSON_VERDICT JSON_TOPRISKS JSON_TOTAL
+  local i n="${#ROW_ID[@]}" eid el eh
+  for ((i = 0; i < n; i++)); do
+    eid=$(_json_escape "${ROW_ID[$i]}")
+    el=$(_json_escape "${ROW_LABEL[$i]}")
+    eh=$(_json_escape "${ROW_HINT[$i]}")
+    [[ -n "$JSON_BODY" ]] && JSON_BODY="$JSON_BODY,"
+    JSON_BODY="$JSON_BODY{\"id\":\"$eid\",\"status\":\"${ROW_STATUS[$i]}\",\"label\":\"$el\",\"hint\":\"$eh\"}"
+  done
+  JSON_HOST=$(_json_escape "$(redact host "$(hostname)")")
+  JSON_MACOS=$(_json_escape "$MACOS_VER")
+  JSON_ARCH=$(_json_escape "$ARCH")
+  _compute_tiers
+  JSON_VERDICT=$(printf '{"profile":"%s","tier":"%s","text":"%s","top_counts":{"urgent":%d,"high":%d,"medium":%d,"low":%d}}' \
+    "$(_json_escape "$PROFILE")" "$OVERALL_PRIORITY" "$(_json_escape "$(_verdict_note)")" \
+    "$TIER_URGENT_N" "$TIER_HIGH_N" "$TIER_MEDIUM_N" "$TIER_LOW_N")
+  JSON_TOPRISKS=$(_build_top_risks_json)
+  JSON_TOTAL=$((PASS_N + WARN_N + FAIL_N + SKIP_N))
+  printf '{\n  "host":"%s","macos":"%s","arch":"%s",\n  "summary":{"pass":%d,"warn":%d,"fail":%d,"skip":%d,"total":%d},\n  "executive_verdict":%s,\n  "top_risks":[%s],\n  "results":[\n    %s\n  ]\n}\n' \
+    "$JSON_HOST" "$JSON_MACOS" "$JSON_ARCH" \
+    "$PASS_N" "$WARN_N" "$FAIL_N" "$SKIP_N" "$JSON_TOTAL" \
+    "$JSON_VERDICT" "$JSON_TOPRISKS" \
+    "$JSON_BODY"
+}
+
+# maybe_write_snapshot — v1.4 opt-in: append a redacted JSON snapshot to the
+# local history dir. This is the ONE write the tool performs, gated on
+# --snapshot (which forces --redact), to the tool's own data dir — never to
+# system or user configuration. The default run remains fully read-only.
+maybe_write_snapshot() {
+  ${SNAPSHOT:-false} || return 0
+  local dir file
+  dir="${MSA_HISTORY_DIR:-$HOME/.mac-posture-audit/history}"
+  mkdir -p "$dir" 2>/dev/null || {
+    printf 'mac-posture-audit: could not create snapshot dir %s\n' "$dir" >&2
+    return 0
+  }
+  file="$dir/posture-$(date +%Y%m%d-%H%M%S).json"
+  if _build_json_document >"$file" 2>/dev/null; then
+    printf 'Snapshot written: %s\n' "$file" >&2
+  else
+    printf 'mac-posture-audit: could not write snapshot %s\n' "$file" >&2
+  fi
+}
+
+# emit_markdown_report — v1.4 --report md: a shareable Markdown report
+# (Executive Verdict + Top risks + full results table). Honors --redact (labels
+# are already redacted at emit time when --redact is set).
+emit_markdown_report() {
+  _compute_tiers
+  local host total i n st icon cell
+  host=$(redact host "$(hostname)")
+  total=$((PASS_N + WARN_N + FAIL_N + SKIP_N))
+  printf '# macOS Posture Audit\n\n'
+  printf -- '- **Host:** `%s`\n' "$host"
+  printf -- '- **macOS:** `%s` · **Arch:** `%s` · **Profile:** `%s`\n' "$MACOS_VER" "$ARCH" "$PROFILE"
+  printf -- '- **Summary:** %d pass · %d warn · %d fail · %d skip (%d total)\n\n' "$PASS_N" "$WARN_N" "$FAIL_N" "$SKIP_N" "$total"
+
+  printf '## Executive Verdict\n\n'
+  if [[ "$FAIL_N" -eq 0 ]]; then
+    printf 'Strong baseline: %d pass, 0 fail.\n\n' "$PASS_N"
+  else
+    printf '%d pass, %d fail.\n\n' "$PASS_N" "$FAIL_N"
+  fi
+  printf '%s\n\n' "$(_verdict_note)"
+  printf '**Action priority: %s**\n\n' "$OVERALL_PRIORITY"
+
+  printf '## Top risks to address\n\n'
+  if [[ "$TOP_N" -ne 0 && ${#RANK_ID[@]} -gt 0 ]]; then
+    printf '| # | tier | effort | id | finding |\n|---|------|--------|----|---------|\n'
+    local shown=0 tier idx t
+    for tier in urgent high medium low; do
+      for ((idx = 0; idx < ${#RANK_ID[@]}; idx++)); do
+        t=$(_tier_of "${RANK_ID[$idx]}" "${RANK_STATUS[$idx]}")
+        [[ "$t" == "$tier" ]] || continue
+        shown=$((shown + 1))
+        [[ "$shown" -gt "$TOP_N" ]] && break 2
+        cell=$(_md_cell "${RANK_LABEL[$idx]}")
+        printf '| %d | %s | %s | `%s` | %s |\n' "$shown" "$tier" "$(_effort_of "${RANK_ID[$idx]}")" "${RANK_ID[$idx]}" "$cell"
+      done
+    done
+    printf '\n'
+  else
+    printf '_No warnings or failures._\n\n'
+  fi
+
+  printf '## All checks\n\n'
+  printf '| status | id | finding |\n|--------|----|---------|\n'
+  n="${#ROW_ID[@]}"
+  for ((i = 0; i < n; i++)); do
+    st="${ROW_STATUS[$i]}"
+    case "$st" in
+    pass) icon="PASS" ;;
+    warn) icon="WARN" ;;
+    fail) icon="FAIL" ;;
+    *) icon="SKIP" ;;
+    esac
+    cell=$(_md_cell "${ROW_LABEL[$i]}")
+    printf '| %s | `%s` | %s |\n' "$icon" "${ROW_ID[$i]}" "$cell"
+  done
+  printf '\n---\n_Generated by mac-posture-audit %s · profile `%s` · read-only._\n' "$SCRIPT_VERSION" "$PROFILE"
+}
+
+# run_trend — v1.4 --trend: read-only longitudinal view over stored snapshots.
+# Compares the oldest and newest snapshot in the history dir and reports which
+# checks improved or regressed. No scan, no writes. Exits.
+run_trend() {
+  local dir files n first last
+  dir="${MSA_HISTORY_DIR:-$HOME/.mac-posture-audit/history}"
+  if [[ ! -d "$dir" ]]; then
+    printf 'No snapshot history at %s — create snapshots with --snapshot first.\n' "$dir"
+    exit 0
+  fi
+  files=$(find "$dir" -maxdepth 1 -name 'posture-*.json' -type f 2>/dev/null | sort)
+  n=$(printf '%s' "$files" | grep -c . || true)
+  [[ -z "$n" ]] && n=0
+  if [[ "$n" -lt 2 ]]; then
+    printf 'Need at least 2 snapshots in %s for a trend (found %d).\n' "$dir" "$n"
+    exit 0
+  fi
+  first=$(printf '%s\n' "$files" | head -1)
+  last=$(printf '%s\n' "$files" | tail -1)
+  printf 'Posture trend — %d snapshots in %s\n' "$n" "$dir"
+  printf '  oldest: %s\n  newest: %s\n\n' "$(basename "$first")" "$(basename "$last")"
+
+  local oldmap id st oldst improved=0 regressed=0 out=""
+  oldmap=" $(_diff_parse_rows oldest <"$first" | sed 's/ /=/' | tr '\n' ' ')"
+  while read -r id st; do
+    [[ -z "$id" ]] && continue
+    oldst=""
+    case "$oldmap" in
+    *" $id="*)
+      oldst="${oldmap##*" $id="}"
+      oldst="${oldst%% *}"
+      ;;
+    esac
+    [[ -z "$oldst" || "$oldst" == "$st" ]] && continue
+    if [[ "$(_status_rank "$st")" -lt "$(_status_rank "$oldst")" ]]; then
+      improved=$((improved + 1))
+      out="${out}  improved   $id: $oldst -> $st"$'\n'
+    else
+      regressed=$((regressed + 1))
+      out="${out}  regressed  $id: $oldst -> $st"$'\n'
+    fi
+  done < <(_diff_parse_rows newest <"$last")
+
+  printf 'Improved: %d   Regressed: %d\n' "$improved" "$regressed"
+  if [[ -n "$out" ]]; then
+    printf '\n%s' "$out"
+  else
+    printf '\nNo status changes between oldest and newest snapshot.\n'
+  fi
+  exit 0
+}
+
 emit_summary() {
   # ═════════════════════════════════════════════════════════════════════════════
   # Summary
@@ -5112,24 +5883,18 @@ emit_summary() {
   if [[ -n "${DIFF_PATH:-}" ]]; then
     emit_diff
   fi
+  # v1.4: Markdown report (REPORT_FORMAT is set with MODE=json so per-row text
+  # and section banners are suppressed during the run). Checked before the JSON
+  # branch since --report md forces MODE=json internally.
+  if [[ -n "${REPORT_FORMAT:-}" ]]; then
+    emit_markdown_report
+    maybe_write_snapshot
+    [[ "$FAIL_N" -gt 0 ]] && exit 1 || exit 0
+  fi
+
   if [[ "$MODE" == "json" ]]; then
-    JSON_BODY=""
-    if [[ ${#JSON_ROWS[@]} -gt 0 ]]; then
-      JSON_BODY=$(
-        IFS=,
-        echo "${JSON_ROWS[*]}"
-      )
-    fi
-    # Escape top-level string fields uniformly. Hostnames in practice don't
-    # contain " or \, but the JSON producer should not assume that — and the
-    # row-level _record path already escapes, so top-level should too.
-    JSON_HOST=$(_json_escape "$(redact host "$(hostname)")")
-    JSON_MACOS=$(_json_escape "$MACOS_VER")
-    JSON_ARCH=$(_json_escape "$ARCH")
-    printf '{\n  "host":"%s","macos":"%s","arch":"%s",\n  "summary":{"pass":%d,"warn":%d,"fail":%d,"skip":%d},\n  "results":[\n    %s\n  ]\n}\n' \
-      "$JSON_HOST" "$JSON_MACOS" "$JSON_ARCH" \
-      "$PASS_N" "$WARN_N" "$FAIL_N" "$SKIP_N" \
-      "$JSON_BODY"
+    _build_json_document
+    maybe_write_snapshot
     ${SUMMARY_LINE:-false} && _emit_summary_line
     [[ "$FAIL_N" -gt 0 ]] && exit 1 || exit 0
   fi
@@ -5141,29 +5906,12 @@ emit_summary() {
   printf "  %s❌ Fail:%s  %d\n" "$RED" "$NC" "$FAIL_N"
   printf "  %s⏭  Skip:%s  %d  %s(checks not applicable / require sudo / unreadable)%s\n" "$DIM" "$NC" "$SKIP_N" "$DIM" "$NC"
 
-  if [[ "$FAIL_N" -gt 0 || "$WARN_N" -gt 0 ]]; then
-    echo
-    printf "%sTop items to address:%s\n" "$BOLD" "$NC"
-    i=0
-    if [[ ${#RESULTS_FAIL[@]} -gt 0 ]]; then
-      for r in "${RESULTS_FAIL[@]}"; do
-        i=$((i + 1))
-        [[ $i -gt 10 ]] && break
-        printf "  %s%d.%s %s\n" "$RED" "$i" "$NC" "$r"
-      done
-    fi
-    if [[ ${#RESULTS_WARN[@]} -gt 0 ]]; then
-      for r in "${RESULTS_WARN[@]}"; do
-        i=$((i + 1))
-        [[ $i -gt 10 ]] && break
-        printf "  %s%d.%s %s\n" "$YELLOW" "$i" "$NC" "$r"
-      done
-    fi
-  fi
+  emit_decision_layer
 
   echo
   printf "%sDone. Re-run after each change to track progress.%s\n" "$DIM" "$NC"
   ${SUMMARY_LINE:-false} && _emit_summary_line
+  maybe_write_snapshot
 
   [[ "$FAIL_N" -gt 0 ]] && exit 1 || exit 0
 }
@@ -5247,11 +5995,204 @@ _emit_summary_line() {
     "$SCRIPT_VERSION" "${PROFILE:-normal}" "$PASS_N" "$WARN_N" "$FAIL_N" "$SKIP_N"
 }
 
+run_explain() {
+  # --explain ID — print one check's threat rationale + per-profile note, then
+  # exit WITHOUT scanning the host. Scoped to the v1.3 high-value ids (chains,
+  # MCP, IDE trust, wallet isolation). Unknown ids point at docs/AGENTS.md so
+  # this never has to mirror every row's hint.
+  local id="$1"
+  case "$id" in
+  chain.fake_interview)
+    cat <<'EXPLAIN'
+chain.fake_interview — Contagious-Interview / "take-home repo" attack chain.
+
+Fires when an IDE can auto-run untrusted code (Workspace Trust off OR
+task.allowAutomaticTasks=on) AND no sandbox runtime (Docker/OrbStack/UTM) is
+installed to contain it. An attacker poses as a recruiter, sends a "coding
+assessment" repo, and your IDE runs its tasks.json / lifecycle scripts the
+moment you open it — on your real host, next to your keys and wallets.
+
+Default: warn. web3 / founder: fail.
+Fix: re-enable Workspace Trust, set task.allowAutomaticTasks to auto, and run
+unknown repos inside a throwaway VM/container.
+EXPLAIN
+    ;;
+  chain.wallet_drain)
+    cat <<'EXPLAIN'
+chain.wallet_drain — wallet exposed on an unisolated, unmonitored machine.
+
+Fires when a wallet browser extension is present AND the wallet workflow is not
+isolated (single user account / wallet in the daily browser) AND no outbound
+monitor (LuLu / Little Snitch) is running. A malicious dApp signature or drainer
+extension can move funds and nothing flags the exfiltration.
+
+Default: warn. web3 / founder: fail.
+Fix: isolate the wallet in a separate macOS user or browser profile, and add an
+outbound monitor (LuLu / Little Snitch) so unfamiliar connections prompt.
+EXPLAIN
+    ;;
+  chain.agent_exposure)
+    cat <<'EXPLAIN'
+chain.agent_exposure — an AI agent on the same machine as your keys.
+
+Fires when an MCP server can reach the filesystem or a remote endpoint AND a
+wallet extension is present. The agent runs with your host's full access; a
+prompt-injected or compromised MCP tool can read SSH keys, cloud creds, and
+wallet data — or move funds.
+
+Default: warn. web3 / founder: fail.
+Fix: scope MCP servers to least privilege, prefer local stdio over remote HTTP,
+keep wallet operations on an isolated user / profile.
+EXPLAIN
+    ;;
+  mcp.servers.remote_http)
+    cat <<'EXPLAIN'
+mcp.servers.remote_http — MCP server reached over remote HTTP/SSE.
+
+A remote MCP transport sends your tool calls (and their results, which can
+include file contents) to a third-party server. Treat the operator as a
+privileged third party with a view into whatever the agent touches.
+
+Default: warn. web3 / paranoid / founder: fail.
+Fix: prefer local stdio MCP servers, especially for wallet / secrets work.
+EXPLAIN
+    ;;
+  mcp.servers.filesystem_capable)
+    cat <<'EXPLAIN'
+mcp.servers.filesystem_capable — an MCP launcher that appears filesystem-capable.
+
+Heuristic, not a capability proof: the configured server looks like the
+filesystem MCP server, or its args hand it a broad path. Such a server gives an
+agent read/write reach across your files.
+
+Default: warn. web3 / developer / founder: fail.
+Fix: review configured MCP servers; grant the narrowest path possible.
+EXPLAIN
+    ;;
+  mcp.servers.unpinned)
+    cat <<'EXPLAIN'
+mcp.servers.unpinned — MCP launcher pinned to @latest or :latest.
+
+An unpinned launcher fetches the newest upstream release every time the host
+starts, so a supply-chain compromise of that package reaches your machine
+immediately — with the agent's full host access.
+
+Default: warn. web3 / paranoid / founder: fail.
+Fix: pin each MCP entry to an exact version or a Docker image digest.
+EXPLAIN
+    ;;
+  ide.vscode.workspace_trust | ide.cursor.workspace_trust)
+    cat <<'EXPLAIN'
+ide.*.workspace_trust — VS Code / Cursor Workspace Trust posture.
+
+Workspace Trust is the in-editor defense against "open a malicious repo and it
+runs code." Disabling it (or auto-opening untrusted files, or suppressing the
+startup prompt) reverts to the pre-1.57 world where every clone can execute on
+open.
+
+Default: warn (disabled = fail). web3 / paranoid / founder: fail.
+Fix: keep security.workspace.trust.enabled true; untrustedFiles = prompt.
+EXPLAIN
+    ;;
+  ide.vscode.automatic_tasks | ide.cursor.automatic_tasks)
+    cat <<'EXPLAIN'
+ide.*.automatic_tasks — folder-open task autorun.
+
+task.allowAutomaticTasks="on" makes a repo's .vscode/tasks.json with
+runOn:folderOpen execute the instant you open the folder — the exact mechanism
+in several Contagious-Interview repos.
+
+Default: warn. web3 / developer / paranoid / founder: fail.
+Fix: set task.allowAutomaticTasks to "auto" (default) or "off".
+EXPLAIN
+    ;;
+  ext.wallet)
+    cat <<'EXPLAIN'
+ext.wallet — wallet browser extension(s) detected.
+
+Wallet extensions (MetaMask, Phantom, Rabby, …) hold signing authority inside
+the browser. In your daily browser, any malicious dApp prompt or compromised
+extension shares that surface.
+
+Default: warn. web3 / paranoid / founder: fail.
+Fix: keep wallets in a dedicated browser/profile or a separate macOS user; pair
+with a transaction simulator and a hardware wallet.
+EXPLAIN
+    ;;
+  users.crypto_isolation_indicator)
+    cat <<'EXPLAIN'
+users.crypto_isolation_indicator — is the wallet workflow isolated?
+
+Composite: fires only when a wallet is present, then checks for a separate user
+account and a non-wallet default browser. A single-admin Mac with the wallet in
+the everyday browser is the highest-blast-radius layout.
+
+Default: warn. web3 / founder: fail.
+Fix: create a dedicated macOS user (or browser profile) for signing.
+EXPLAIN
+    ;;
+  *)
+    printf 'No extended explanation for "%s" yet. See docs/AGENTS.md.\n' "$id"
+    ;;
+  esac
+  exit 0
+}
+
+run_profile_auto() {
+  # --profile auto — advisory: detect a few signals and recommend a profile,
+  # then exit. Read-only and lightweight (app bundles, dev toolchains on PATH,
+  # known wallet extension ids). Does NOT auto-pick paranoid/journalist: those
+  # are deliberate threat-model choices, not detectable from the machine.
+  local dev=false web3=false r app bin
+  local app_roots=("/Applications" "$HOME/Applications")
+  for app in "Visual Studio Code.app" "Cursor.app" "Windsurf.app" "Zed.app"; do
+    for r in "${app_roots[@]}"; do [[ -d "$r/$app" ]] && dev=true; done
+  done
+  for bin in npm cargo go pnpm yarn; do command -v "$bin" >/dev/null 2>&1 && dev=true; done
+  for app in "Ledger Live.app" "Trezor Suite.app" "Keystone.app" "Frame.app"; do
+    for r in "${app_roots[@]}"; do [[ -d "$r/$app" ]] && web3=true; done
+  done
+  # Known wallet browser-extension ids (MetaMask, Phantom, Rabby).
+  if find "$HOME/Library/Application Support" -maxdepth 5 -type d \
+    \( -name nkbihfbeogaeaoehlefnkodbefgpgknn \
+    -o -name bfnaelmomeimhlpmgjnjophhpkkoljpa \
+    -o -name acmacodkjbdgmoleebolmdjonilkdbch \) 2>/dev/null | grep -q .; then
+    web3=true
+  fi
+  local rec devs="no" websig="no"
+  $dev && devs="yes"
+  $web3 && websig="yes"
+  if $dev && $web3; then
+    rec="founder"
+  elif $web3; then
+    rec="web3"
+  elif $dev; then
+    rec="developer"
+  else
+    rec="normal"
+  fi
+  printf 'Profile auto-detect (advisory)\n'
+  printf '  developer signals (IDE / dev toolchain): %s\n' "$devs"
+  printf '  web3 signals (wallet app / extension):   %s\n\n' "$websig"
+  printf 'Recommended profile: %s\n' "$rec"
+  printf 'Re-run with:  ./mac-posture-audit.sh --profile %s\n' "$rec"
+  printf '(paranoid / journalist are threat-model choices — select them deliberately.)\n'
+  exit 0
+}
+
 main() {
   parse_args "$@"
   if $SELFTEST; then
     init_colors
     run_selftest
+  fi
+  # Advisory + read-only modes exit before any scan.
+  if ${PROFILE_AUTO:-false}; then
+    run_profile_auto
+  fi
+  # --trend is read-only and reads stored snapshots only — no scan.
+  if ${TREND:-false}; then
+    run_trend
   fi
   detect_runtime
   init_colors

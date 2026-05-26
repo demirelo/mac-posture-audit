@@ -23,6 +23,10 @@ browser.password_autofill
 browser.profile_count
 browser.remote_debugging
 browser.version_currency
+chain.agent_exposure
+chain.cloud_exfil
+chain.fake_interview
+chain.wallet_drain
 cloud.icloud.desktop_documents_sync
 cred.aws.creds
 cred.docker.auth
@@ -62,7 +66,11 @@ git.signing.allowedsigners
 git.signing.enabled
 icloud.adp
 icloud.drive.active
+ide.cursor.automatic_tasks
+ide.cursor.trusted_folders
 ide.cursor.workspace_trust
+ide.vscode.automatic_tasks
+ide.vscode.trusted_folders
 ide.vscode.workspace_trust
 icloud.savetocloud
 icloud.signedin
@@ -71,6 +79,8 @@ login.lock.immediate
 login.touchid.sudo
 login.window.namepw
 mcp.servers.count
+mcp.servers.filesystem_capable
+mcp.servers.launcher
 mcp.servers.remote_http
 mcp.servers.suspicious
 mcp.servers.unpinned

@@ -52,6 +52,17 @@ reset_state() {
   RESULTS_FAIL=()
   RESULTS_SKIP=()
   JSON_ROWS=()
+  RANK_ID=()
+  RANK_STATUS=()
+  RANK_LABEL=()
+  RANK_HINT=()
+  ROW_ID=()
+  ROW_STATUS=()
+  ROW_LABEL=()
+  ROW_HINT=()
+  REPORT_FORMAT=""
+  SNAPSHOT=false
+  TREND=false
   EMITTED_IDS=" "
   STATUS_BY_ID=""
   MODE="json"
@@ -59,6 +70,7 @@ reset_state() {
   NETWORK=false
   REDACT=false
   PROFILE="normal"
+  TOP_N=7
   ARCH="arm64"
   MACOS_VER="test"
   IS_APPLE_SILICON=false

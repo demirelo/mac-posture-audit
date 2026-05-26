@@ -1,0 +1,30 @@
+# mac-posture-audit exposure catalog — maintained deny-list (v1.4 feed)
+#
+# This file ships SEPARATELY from the audit script on purpose: a new wallet-
+# drainer extension id or a compromised npm/MCP release can be added here and
+# distributed via `git pull` without rev'ing (or re-reviewing) the scanner. Use
+# it with:
+#
+#     ./mac-posture-audit.sh --exposure-catalog catalog/known-bad.txt
+#
+# Format — one entry per line, pipe-separated. Blank lines and lines starting
+# with `#` are ignored:
+#
+#     category|name|severity[|advisory-id]
+#
+# Categories:  browser_extension_id · editor_extension · mcp_server ·
+#              mcp_package · app_bundle_id · brew_formula
+# Severity:    info (surfaces as skip) · warn · critical (surfaces as fail)
+# Matching:    case-insensitive on `name`. Unknown categories/severities are
+#              ignored (forward-compatible).
+#
+# This starter ships with NO live indicators — populate it from a threat-intel
+# feed you trust. Examples of the shape (commented out; not real indicators):
+#
+#   browser_extension_id|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|critical|example-drainer-0000
+#   editor_extension|some.malicious-publisher|critical|example-vsx-0000
+#   mcp_server|untrusted-remote-mcp|critical|example-mcp-0000
+#
+# Integrity: tag releases of this file and verify the signature out-of-band, the
+# same way the script's release tags are SSH-signed (see SECURITY.md). Treat an
+# unsigned or unexpected change to this file as untrusted.
