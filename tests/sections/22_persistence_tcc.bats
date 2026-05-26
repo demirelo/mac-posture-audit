@@ -541,3 +541,27 @@ exit 0'
   assert_recorded skip "Background items not enumerable read-only"
   [[ "${RESULTS_SKIP[*]}" == *"GUI authorization prompt"* ]]
 }
+
+# ── persistence.launchagent.webhook_destination (v1.6) ─────────────────────
+
+@test "LaunchAgent plist with a webhook — warns, provider named, URL not leaked" {
+  printf '<plist><dict><key>ProgramArguments</key><array><string>/usr/bin/curl</string><string>https://webhook.site/abcd-SECRET</string></array></dict></plist>' \
+    >"$TEST_HOME/Library/LaunchAgents/com.exfil.agent.plist"
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded warn "Webhook destination(s) in"
+  [[ "${RESULTS_WARN[*]}" == *"webhook.site"* ]]
+  local all="${RESULTS_PASS[*]:-} ${RESULTS_WARN[*]:-} ${RESULTS_FAIL[*]:-} ${RESULTS_SKIP[*]:-}"
+  [[ "$all" != *"abcd-SECRET"* ]]
+}
+
+@test "LaunchAgents with no webhook — launchagent webhook passes" {
+  : >"$TEST_HOME/Library/LaunchAgents/com.example.normal.plist"
+  mock_osascript_empty
+  mock_crontab_empty
+  QUICK=true
+  section_22_persistence_tcc
+  assert_recorded pass "No webhook/exfil destinations in LaunchAgent/Daemon plists"
+}

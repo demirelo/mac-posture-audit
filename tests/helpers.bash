@@ -98,6 +98,9 @@ reset_state() {
   unset BROWSER_EXT_FIREFOX_ROOTS
   unset EDITOR_EXT_ROOTS
   unset MCP_CONFIG_PATHS
+  # v1.6: agent instruction-file discovery state + hermetic root override.
+  AGENT_FILES_FOUND=0
+  unset AGENT_INSTRUCTION_ROOTS
 }
 
 assert_recorded() {
