@@ -165,6 +165,75 @@ set_status() {
   assert_recorded fail "Cursor workspace trust posture"
 }
 
+# ─── IDE automatic tasks (folder-open autorun) ────────────────────────────
+
+@test "VS Code task.allowAutomaticTasks=on — warns by default" {
+  load_script
+  isolate_home
+  write_vscode_settings '{
+    "task.allowAutomaticTasks": "on"
+  }'
+  section_24_ide_trust
+  assert_recorded warn "VS Code auto-runs tasks.json on folder open"
+}
+
+@test "VS Code automatic tasks on — founder profile escalates to fail" {
+  load_script
+  isolate_home
+  PROFILE="founder"
+  write_vscode_settings '{ "task.allowAutomaticTasks": "on" }'
+  section_24_ide_trust
+  assert_recorded fail "VS Code auto-runs tasks.json on folder open"
+}
+
+@test "VS Code automatic tasks not set — passes" {
+  load_script
+  isolate_home
+  write_vscode_settings '{ "editor.fontSize": 13 }'
+  section_24_ide_trust
+  assert_recorded pass "VS Code: automatic tasks not forced on"
+}
+
+@test "Cursor automatic tasks on — web3 profile escalates to fail" {
+  load_script
+  isolate_home
+  PROFILE="web3"
+  write_cursor_settings '{ "task.allowAutomaticTasks": "on" }'
+  section_24_ide_trust
+  assert_recorded fail "Cursor auto-runs tasks.json on folder open"
+}
+
+# ─── IDE trusted-folder sprawl (workspace-count proxy) ─────────────────────
+
+@test "VS Code many workspaces — warns on trust sprawl" {
+  load_script
+  isolate_home
+  mkdir -p "$IDE_TEST_APPS/Visual Studio Code.app"
+  ws="$HOME/Library/Application Support/Code/User/workspaceStorage"
+  mkdir -p "$ws"
+  for i in $(seq 1 30); do mkdir -p "$ws/ws$i"; done
+  section_24_ide_trust
+  assert_recorded warn "VS Code has opened 30 workspaces"
+}
+
+@test "VS Code few workspaces — passes" {
+  load_script
+  isolate_home
+  mkdir -p "$IDE_TEST_APPS/Visual Studio Code.app"
+  ws="$HOME/Library/Application Support/Code/User/workspaceStorage"
+  mkdir -p "$ws/a" "$ws/b" "$ws/c"
+  section_24_ide_trust
+  assert_recorded pass "VS Code workspace count modest (3"
+}
+
+@test "VS Code installed, no workspaceStorage — trusted-folders skip" {
+  load_script
+  isolate_home
+  mkdir -p "$IDE_TEST_APPS/Visual Studio Code.app"
+  section_24_ide_trust
+  assert_recorded skip "VS Code: no workspaces opened yet"
+}
+
 # ─── users.crypto_isolation_indicator ─────────────────────────────────────
 
 @test "no wallet detected — composite skips with N/A" {

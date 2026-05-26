@@ -178,6 +178,67 @@ write_catalog() {
   assert_recorded skip "MCP servers configured: 2"
 }
 
+@test "npx launcher — informational launcher row" {
+  load_script
+  isolate_home
+  local cfg="$BATS_TEST_TMPDIR/cursor.json"
+  write_mcp_config "$cfg" '{"mcpServers":{"a":{"command":"npx","args":["-y","@foo/bar@1.0.0"]}}}'
+  MCP_CONFIG_PATHS=("$cfg")
+
+  _check_mcp_servers
+
+  assert_recorded skip "use dynamic launchers"
+}
+
+@test "static command path — launcher row reports none" {
+  load_script
+  isolate_home
+  local cfg="$BATS_TEST_TMPDIR/cursor.json"
+  write_mcp_config "$cfg" '{"mcpServers":{"a":{"command":"/opt/mcp/server","args":["--stdio"]}}}'
+  MCP_CONFIG_PATHS=("$cfg")
+
+  _check_mcp_servers
+
+  assert_recorded skip "No MCP servers use dynamic launchers"
+}
+
+@test "filesystem MCP server — filesystem_capable warn" {
+  load_script
+  isolate_home
+  local cfg="$BATS_TEST_TMPDIR/cursor.json"
+  write_mcp_config "$cfg" '{"mcpServers":{"fs":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/Users/me/code"]}}}'
+  MCP_CONFIG_PATHS=("$cfg")
+
+  _check_mcp_servers
+
+  assert_recorded warn "appear filesystem-capable"
+}
+
+@test "filesystem-capable — founder profile escalates to fail" {
+  load_script
+  isolate_home
+  PROFILE="founder"
+  local cfg="$BATS_TEST_TMPDIR/cursor.json"
+  write_mcp_config "$cfg" '{"mcpServers":{"fs":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/Users/me"]}}}'
+  MCP_CONFIG_PATHS=("$cfg")
+
+  _check_mcp_servers
+
+  assert_recorded fail "appear filesystem-capable"
+}
+
+@test "no filesystem signal — filesystem_capable pass" {
+  load_script
+  isolate_home
+  local cfg="$BATS_TEST_TMPDIR/cursor.json"
+  write_mcp_config "$cfg" '{"mcpServers":{"a":{"command":"npx","args":["-y","@foo/bar@1.0.0"]}}}'
+  MCP_CONFIG_PATHS=("$cfg")
+
+  _check_mcp_servers
+
+  assert_recorded pass "No MCP servers appear filesystem-capable"
+}
+
 @test "malformed JSON skipped (plutil -convert rejects, no rows from that file)" {
   if ! command -v plutil >/dev/null 2>&1; then
     skip "plutil not available — validation step is a no-op on this host"

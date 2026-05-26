@@ -65,7 +65,10 @@ from pathlib import Path
 src = Path("mac-posture-audit.sh").read_text()
 m = re.search(r"PROFILE_OVERRIDES=\(([\s\S]*?)\n\)", src)
 assert m, "PROFILE_OVERRIDES table not found in source"
-entries = re.findall(r'"([^"]+)"', m.group(1))
+# Ignore comment lines: they may contain quoted words (e.g. "skip", "on") that
+# are not override entries and would otherwise break the pipe-split below.
+body = "\n".join(ln for ln in m.group(1).splitlines() if not ln.lstrip().startswith("#"))
+entries = [e for e in re.findall(r'"([^"]+)"', body) if "|" in e]
 override_ids = sorted({e.split("|")[1] for e in entries})
 
 fixed = set(Path("tests/fixtures/expected_ids.txt").read_text().split())

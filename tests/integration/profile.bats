@@ -61,3 +61,48 @@ setup() {
   [ "$status" -eq 0 ] || [ "$status" -eq 1 ]
   [[ "$output" =~ \"id\" ]]
 }
+
+# ── v1.5: journalist profile ──────────────────────────────────────────────
+
+@test "journalist profile: lockdown-off skip -> warn" {
+  PROFILE="journalist"
+  skip "Lockdown Mode is off" "" "privacy.lockdown.on"
+  assert_recorded warn "Lockdown Mode is off"
+  [ "$WARN_N" -eq 1 ]
+}
+
+@test "journalist profile: bluetooth warn -> fail" {
+  PROFILE="journalist"
+  warn "Bluetooth is on" "..." "network.bluetooth.off"
+  assert_recorded fail "Bluetooth is on"
+  [ "$FAIL_N" -eq 1 ]
+}
+
+@test "journalist profile: diagnostics telemetry warn -> fail" {
+  PROFILE="journalist"
+  warn "Diagnostics submission is on" "..." "privacy.diagnostics.off"
+  assert_recorded fail "Diagnostics"
+}
+
+@test "journalist profile: leaves crypto/supply-chain at default (not its focus)" {
+  PROFILE="journalist"
+  warn "Wallet extension(s) installed: MetaMask" "..." "ext.wallet"
+  assert_recorded warn "Wallet extension"
+  [ "$FAIL_N" -eq 0 ]
+}
+
+# ── v1.5: --profile auto (advisory) ───────────────────────────────────────
+
+@test "--profile auto recommends a profile and exits without scanning" {
+  run bash -c '"$1" --profile auto 2>&1' _ "$REPO_ROOT/mac-posture-audit.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Recommended profile:"* ]]
+  [[ "$output" != *"Summary"* ]]
+  [[ "$output" != *"System Integrity"* ]]
+}
+
+@test "--profile journalist end-to-end reports under the journalist profile" {
+  run bash -c '"$1" --quick --json --profile journalist 2>/dev/null' _ "$REPO_ROOT/mac-posture-audit.sh"
+  [ "$status" -eq 0 ] || [ "$status" -eq 1 ]
+  [[ "$output" == *'"profile":"journalist"'* ]]
+}
