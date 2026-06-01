@@ -17,9 +17,13 @@
 FROM gcr.io/oss-fuzz-base/base-builder-python@sha256:68bd7fc69673d3e46e0fc21affa28d360994985f36626ace6cc93c1119406ae6
 
 # Atheris is the Google Python coverage-guided fuzzer that ClusterFuzzLite
-# uses by default for Python projects. Pinned to an exact version so
-# Scorecard's pipCommand check passes. Bump deliberately.
-RUN pip install --no-cache-dir atheris==3.0.0
+# uses by default for Python projects. Hash-pinned via a tiny requirements
+# file so Scorecard's Pinned-Dependencies pipCommand check passes (an
+# `atheris==3.0.0` version pin alone is not enough — Scorecard wants the
+# wheel sha256). All four atheris==3.0.0 distribution files are listed in
+# requirements.txt so pip can pick whichever matches the base image's Python.
+COPY .clusterfuzzlite/requirements.txt /tmp/cflite-requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r /tmp/cflite-requirements.txt
 
 COPY . $SRC/mac-posture-audit
 WORKDIR $SRC/mac-posture-audit
