@@ -67,7 +67,14 @@ jobs:
               fail=1
             fi
           done
-          for f in tests/check-read-only/should_fail/*.sh; do
+          # Should-fail fixtures are stored without the .sh extension and
+          # without a shebang so OpenSSF Scorecard's shell parser ignores them
+          # (otherwise it false-positives the intentional `curl | bash` and
+          # `npm install` bait as unpinned downloads, dragging Pinned-Dependencies
+          # down to ~5/10). The tripwire greps file content regardless of
+          # extension, so this rename does not weaken the negative tests.
+          for f in tests/check-read-only/should_fail/*; do
+            [ -f "$f" ] || continue
             if ./scripts/check-read-only.sh "$f" >/dev/null 2>&1; then
               echo "::error file=$f::tripwire failed to reject this fixture"
               fail=1

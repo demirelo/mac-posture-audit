@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-exit 0
 # Tripwire bait below; never executed. A mutating AppleScript must be rejected
 # even if a read-only phrase appears elsewhere in the script text.
 osascript -e 'tell application "Finder" to set name of folder "x" to "y" -- to get'
