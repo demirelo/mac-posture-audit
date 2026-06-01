@@ -1,0 +1,9 @@
+# Exclude tripwire-negative fixtures from OpenSSF Scorecard's
+# Pinned-Dependencies scan. These files INTENTIONALLY contain `curl | bash`
+# and `npm install` so the read-only tripwire (scripts/check-read-only.sh)
+# can verify it rejects them. They are bait the tripwire eats, not executed
+# code; "pinning" them would defeat their purpose.
+#
+# Scorecard honors export-ignore only when its action is run with the
+# `file_mode: git` input — that's set in .github/workflows/scorecard.yml.
+tests/check-read-only/should_fail/**  export-ignore
