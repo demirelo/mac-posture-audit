@@ -1,6 +1,7 @@
 # mac-posture-audit
 
 [![Safety](https://github.com/demirelo/mac-posture-audit/actions/workflows/safety.yml/badge.svg?branch=main)](https://github.com/demirelo/mac-posture-audit/actions/workflows/safety.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/demirelo/mac-posture-audit/badge)](https://scorecard.dev/viewer/?uri=github.com/demirelo/mac-posture-audit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Bash 3.2 compatible](https://img.shields.io/badge/bash-3.2%20compatible-blue)](#compatibility)
 
