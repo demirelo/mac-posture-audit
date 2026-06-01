@@ -75,13 +75,16 @@ jobs:
         run: |
           set -euo pipefail
           asset="${{ steps.build.outputs.asset }}"
+          # cosign v3 deprecated --output-signature / --output-certificate in
+          # favor of --bundle, which writes a single JSON .sigstore bundle
+          # containing the signature, the Fulcio certificate, and the Rekor
+          # transparency log entry. Scorecard's signed-releases check matches
+          # the .sigstore extension, so this satisfies it with one file.
           cosign sign-blob --yes \
-            --output-signature "${asset}.sig" \
-            --output-certificate "${asset}.pem" \
+            --bundle "${asset}.sigstore" \
             "${asset}"
           echo "signed: ${asset}"
-          echo "signature: ${asset}.sig"
-          echo "certificate: ${asset}.pem"
+          echo "bundle:  ${asset}.sigstore"
 
       - name: Upload assets to release
         env:
@@ -93,6 +96,5 @@ jobs:
           gh release upload "$tag" \
             "${asset}" \
             "${asset}.sha256" \
-            "${asset}.sig" \
-            "${asset}.pem" \
+            "${asset}.sigstore" \
             --clobber
