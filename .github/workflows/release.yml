@@ -31,8 +31,11 @@ jobs:
     permissions:
       # Needed to upload assets to the release.
       contents: write
-      # Needed for cosign keyless OIDC signing.
+      # Needed for cosign keyless OIDC signing AND attest-build-provenance.
       id-token: write
+      # Needed for actions/attest-build-provenance to publish the in-toto
+      # attestation to GitHub's attestation API alongside Rekor.
+      attestations: write
     steps:
       - name: Resolve tag
         id: tag
@@ -86,6 +89,24 @@ jobs:
           echo "signed: ${asset}"
           echo "bundle:  ${asset}.sigstore"
 
+      - name: Generate SLSA build provenance
+        id: attest
+        # Generates an in-toto SLSA-provenance attestation for the tarball and
+        # publishes it to GitHub's attestation API (and Sigstore's Rekor log).
+        # Pairs with the cosign signature above to satisfy BOTH legs of
+        # Scorecard's Signed-Releases check (signature + provenance) — the
+        # second leg is what was missing for the 8/10 -> 10/10 jump.
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: ${{ steps.build.outputs.asset }}
+
+      - name: Stage attestation under a predictable name
+        run: |
+          set -euo pipefail
+          asset="${{ steps.build.outputs.asset }}"
+          cp "${{ steps.attest.outputs.bundle-path }}" "${asset}.intoto.jsonl"
+          ls -lh "${asset}".*
+
       - name: Upload assets to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -97,4 +118,5 @@ jobs:
             "${asset}" \
             "${asset}.sha256" \
             "${asset}.sigstore" \
+            "${asset}.intoto.jsonl" \
             --clobber
