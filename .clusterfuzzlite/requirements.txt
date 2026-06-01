@@ -1,0 +1,20 @@
+# Hash-pinned Python deps for the ClusterFuzzLite fuzz harness. Used with
+# `pip install --require-hashes -r` so Scorecard's Pinned-Dependencies
+# pipCommand check passes. Bump deliberately and refresh all sha256
+# entries via:
+#
+#   curl -sS https://pypi.org/pypi/atheris/<VERSION>/json | python3 -c '
+#   import json, sys
+#   for f in json.load(sys.stdin)["urls"]:
+#       print(f"{f[\"filename\"]:<70} sha256:{f[\"digests\"][\"sha256\"]}")
+#   '
+#
+# All four atheris==3.0.0 distribution files are listed (the three published
+# manylinux wheels + the source sdist) so pip can pick whichever matches the
+# base-builder-python image's Python version.
+
+atheris==3.0.0 \
+    --hash=sha256:8a5c8a781467c187da40fd29139784193e2647058831f837f675d0bb8cbd8746 \
+    --hash=sha256:510e502c57b6dc615fb174066407af620d4c7f73cf08a782c86e7761bf12c4eb \
+    --hash=sha256:a402cdca8a650d1371050b1f9552eb4cdc488d2db64950d603c4560318365eac \
+    --hash=sha256:1f0929c7bc3040f3fe4102e557718734190cf2d7718bbb8e3ce6d3eb56ef5bb3
