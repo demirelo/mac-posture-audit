@@ -1,0 +1,48 @@
+name: ClusterFuzzLite PR fuzzing
+
+# Short coverage-guided fuzz on every PR that touches the Python renderer
+# or the fuzzing config itself. Keeps run-time small (~60 s per sanitizer).
+# Pairs with cflite_batch.yml (longer nightly runs) and cflite_cron.yml
+# (corpus pruning + coverage).
+
+on:
+  pull_request:
+    paths:
+      - 'tools/**'
+      - '.clusterfuzzlite/**'
+      - '.github/workflows/cflite_*.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  PR:
+    name: ClusterFuzzLite PR fuzz (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed by run_fuzzers to upload SARIF crash reports to the security tab.
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Python only supports address + undefined sanitizers via Atheris;
+        # memory sanitizer is C/C++ specific.
+        sanitizer: [address, undefined]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Build fuzzers
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+          sanitizer: ${{ matrix.sanitizer }}
+
+      - name: Run fuzzers
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 60
+          mode: code-change
+          sanitizer: ${{ matrix.sanitizer }}
