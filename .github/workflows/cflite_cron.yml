@@ -1,0 +1,55 @@
+name: ClusterFuzzLite continuous corpus pruning
+
+# Weekly long-form run that prunes the saved corpus + computes coverage.
+# Keeps the cflite_batch corpus from growing unboundedly.
+
+on:
+  schedule:
+    - cron: '0 12 * * 6'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  Pruning:
+    name: ClusterFuzzLite corpus pruning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Build fuzzers
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+
+      - name: Run fuzzers (prune)
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 600
+          mode: prune
+
+  Coverage:
+    name: ClusterFuzzLite coverage report
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Build fuzzers (coverage sanitizer)
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+          sanitizer: coverage
+
+      - name: Generate coverage report
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 600
+          mode: coverage
+          sanitizer: coverage

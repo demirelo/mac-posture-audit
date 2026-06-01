@@ -1,0 +1,43 @@
+name: ClusterFuzzLite batch fuzzing
+
+# Longer corpus-growing fuzz runs on a schedule (every 6 hours). Picks up
+# where cflite_pr.yml leaves off — that one only fuzzes touched code for
+# ~60s per sanitizer; this one fuzzes for 30 min on a fixed cadence.
+
+on:
+  schedule:
+    - cron: '0 0/6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  BatchFuzzing:
+    name: ClusterFuzzLite batch fuzz (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed by run_fuzzers to upload SARIF crash reports.
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Build fuzzers
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+          sanitizer: ${{ matrix.sanitizer }}
+
+      - name: Run fuzzers
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 1800
+          mode: batch
+          sanitizer: ${{ matrix.sanitizer }}
