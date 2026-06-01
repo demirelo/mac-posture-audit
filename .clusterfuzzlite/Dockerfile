@@ -15,5 +15,7 @@ RUN pip install --no-cache-dir atheris
 COPY . $SRC/mac-posture-audit
 WORKDIR $SRC/mac-posture-audit
 
-# build.sh is what ClusterFuzzLite invokes to compile the fuzzers.
-COPY .clusterfuzzlite/build.sh /
+# ClusterFuzzLite's compile.sh entry point runs `$SRC/build.sh` (i.e.
+# /src/build.sh) — not /build.sh. Copying to / silently broke the build with
+# "bash: /src/build.sh: No such file or directory".
+COPY .clusterfuzzlite/build.sh $SRC/

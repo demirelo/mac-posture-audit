@@ -16,11 +16,13 @@ import sys
 
 import atheris
 
-# Make tools/ importable when the fuzzer runs from the repo root (local) and
-# from $SRC/mac-posture-audit (in ClusterFuzzLite's Docker build).
+# build.sh colocates render_report.py with this file inside the
+# ClusterFuzzLite Docker build, so it sits on `sys.path` already after
+# PyInstaller bundling. The fallback below lets the fuzzer also run directly
+# from a developer checkout where render_report.py still lives in tools/.
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO = os.path.dirname(_HERE)
-sys.path.insert(0, os.path.join(_REPO, "tools"))
+if not os.path.exists(os.path.join(_HERE, "render_report.py")):
+    sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "tools"))
 
 with atheris.instrument_imports():
     import render_report  # noqa: E402  (post-instrumentation import)
