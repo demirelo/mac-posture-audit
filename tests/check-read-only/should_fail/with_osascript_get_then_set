@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-exit 0
 # Tripwire bait below; never executed. The approved read-only login-item query
 # must not allow extra mutating AppleScript expressions on the same invocation.
 osascript -e 'tell application "System Events" to get the name of every login item' -e 'tell application "Finder" to set name of folder "x" to "y"'
