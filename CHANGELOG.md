@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+Project-hygiene and supply-chain-of-the-repo hardening only. **The auditor
+itself is unchanged** — `mac-posture-audit.sh` is byte-identical to v1.6.0, the
+checks, terminal/JSON/Markdown output, and schema are all the same, so there is
+no `SCRIPT_VERSION` bump. These entries will fold into the next behavioral
+release's notes.
+
+### Added
+
+- **OpenSSF Scorecard** — `scorecard.yml` workflow + README badge, publishing to the public Scorecard API. Score moved 3.9 → 7.5 over a hardening pass.
+- **Signed releases** — `release.yml` builds a release tarball on every `v*` tag (and on demand via `workflow_dispatch`), signs it with Sigstore-cosign keyless OIDC (`.sigstore` bundle), and attaches an SLSA build-provenance attestation (`.intoto.jsonl`) + a SHA-256 sum. Pairs with the existing SSH-signed git tag. v1.6.0 was back-filled with signed assets.
+- **CodeQL** — `codeql.yml` static analysis over the Python surface (`tools/render_report.py` + test helpers). The audit script stays covered by shellcheck + the read-only tripwire.
+- **ClusterFuzzLite + Atheris fuzzing** — `.clusterfuzzlite/` harness fuzzes `tools/render_report.py` against malformed/hostile JSON (PR 60s, batch 30min/6h, weekly prune+coverage).
+- **Dependabot** — weekly `github-actions` updates so the SHA-pinned actions stay current.
+- **Branch protection** on `main` — required status check (`Read-only audit checks`), linear history, no force-push/deletion, admin-enforced.
+
+### Changed
+
+- **Hardened CI** — least-privilege `permissions:` on every workflow token; all GitHub Actions, the OSS-Fuzz base image (sha256 digest), and the pinned `atheris` (hash-pinned via `--require-hashes`) are fully pinned, so Scorecard's Pinned-Dependencies is clean.
+- Renamed the read-only tripwire's negative fixtures (`tests/check-read-only/should_fail/*.sh` → extensionless, shebang stripped) so Scorecard's shell parser ignores the intentional `curl | bash` / `npm install` bait. The tripwire greps file content, so the negative tests are unaffected.
+
 ## [1.6.0] - 2026-05-26
 
 The "Supply-chain / Agent Blast-Radius Update." Answers a new question: if a poisoned package, IDE extension, MCP server, or AI-agent instruction file ran on this Mac, what could it plausibly *reach*? Adds a new section for AI agent instruction-file hygiene, webhook/exfil-shape detection across the config surfaces that run automatically, registry-credential exposure, a supply-chain blast-radius composite, and two named attack chains. 169 → 183 checks; 29 → 30 sections. Detects posture and dangerous *shapes*, not malware — and never reads or prints a secret value, full URL, token, or matched line. Read-only, single-file, bash 3.2, no-network invariants preserved (no python3 at runtime — hidden-Unicode detection is byte-matched with `LC_ALL=C grep`).
