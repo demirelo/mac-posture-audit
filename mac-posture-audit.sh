@@ -30,7 +30,7 @@
 # shellcheck disable=SC2088
 set -uo pipefail
 
-SCRIPT_VERSION="1.6.0"
+SCRIPT_VERSION="1.7.0"
 
 # ── State ───────────────────────────────────────────────────────────────────
 PASS_N=0
@@ -52,7 +52,10 @@ declare -a RANK_ID RANK_STATUS RANK_LABEL RANK_HINT
 # Every emitted row (any status), in emission order, so the Markdown report
 # (--report md) can render the complete results table grouped by area without
 # re-parsing JSON. Cheap (~170 short strings); reset between runs in tests.
-declare -a ROW_ID ROW_STATUS ROW_LABEL ROW_HINT
+# ROW_EVIDENCE (v1.7) holds the inner body of each row's optional `evidence`
+# object (a comma-joined list of `"key":value` pairs, or "" for none). Kept
+# index-aligned with ROW_ID so _build_json_document can emit it verbatim.
+declare -a ROW_ID ROW_STATUS ROW_LABEL ROW_HINT ROW_EVIDENCE
 
 # ── Exposure catalog state ──────────────────────────────────────────────────
 # Parallel arrays — bash 3.2 has no associative arrays. Populated by
@@ -771,11 +774,59 @@ _status_of() {
   printf ''
 }
 
+# ── Evidence staging (v1.7) ─────────────────────────────────────────────────
+# A check may attach a structured `evidence` object to the row it is about to
+# emit. Evidence is the small set of machine-checked facts the status was
+# derived from — counts, booleans, enums — so an LLM (or a human) reading the
+# JSON can see *why* a row is warn/fail without re-deriving it from the prose
+# label. Fields are staged with `ev` / `ev_raw` immediately before the
+# pass/warn/fail/skip call, then consumed and cleared by the next _record.
+#
+# CONTRACT — evidence values must be redaction-safe: no hostnames, brands,
+# paths, usernames, or other host-identifying strings. Stick to counts,
+# booleans, and fixed enums (the same rule labels follow). Evidence is emitted
+# regardless of --redact, so anything host-identifying would defeat it.
+#
+# The staging buffer is the inner body of a JSON object (`"k":v,"k2":v2`);
+# _build_json_document wraps it in braces. Kept flat (scalar values only) so the
+# stock-shell --diff parser, which splits rows on `},{`, is never confused.
+_EV=""
+
+ev_reset() { _EV=""; }
+
+_ev_append() {
+  # _ev_append '"key":<json-value>'
+  if [[ -z "$_EV" ]]; then _EV="$1"; else _EV="$_EV,$1"; fi
+}
+
+# ev KEY STRING_VALUE — stage a string-valued evidence field (value is escaped).
+ev() {
+  local k v
+  k=$(_json_escape "$1")
+  v=$(_json_escape "$2")
+  _ev_append "\"$k\":\"$v\""
+}
+
+# ev_raw KEY RAW_VALUE — stage a field whose value is already valid JSON
+# (integer, or the booleans true/false). Use for counts and flags. The value
+# is NOT quoted, so pass "true"/"false"/an integer, never free text.
+ev_raw() {
+  local k
+  k=$(_json_escape "$1")
+  _ev_append "\"$k\":$2"
+}
+
 _record() {
   # _record STATUS "label" "hint" "id"
   # id is optional and identifies a logical check uniquely within a single run.
   # Stable across runs so external consumers can diff successive scans by id.
   local status="$1" label="$2" hint="${3:-}" id="${4:-}"
+
+  # Consume and clear the evidence staging buffer up front, so exactly one row
+  # carries it and it can never leak into a later row regardless of which
+  # branch below returns.
+  local evidence="$_EV"
+  _EV=""
 
   # Reject duplicate ids early. A typo'd or copy-pasted id would otherwise
   # show up only in the post-hoc JSON validator with a confusing site.
@@ -797,6 +848,7 @@ _record() {
   ROW_STATUS+=("$status")
   ROW_LABEL+=("$label")
   ROW_HINT+=("$hint")
+  ROW_EVIDENCE+=("$evidence")
 
   # 1. Always increment counters first — JSON mode used to skip these.
   case "$status" in
@@ -1121,23 +1173,30 @@ section_01_system_integrity() {
   section "01 · System Integrity (Disk & Boot)"
 
   if csrutil status 2>/dev/null | grep -qi "enabled"; then
+    ev probe "csrutil status"; ev_raw enabled true
     pass "SIP (System Integrity Protection) is enabled" "system.sip.enabled"
   else
+    ev probe "csrutil status"; ev_raw enabled false
     fail "SIP is disabled" "Re-enable from Recovery Mode: csrutil enable" "system.sip.enabled"
   fi
 
   if spctl --status 2>/dev/null | grep -qi "assessments enabled"; then
+    ev probe "spctl --status"; ev_raw enabled true
     pass "Gatekeeper is enabled" "system.gatekeeper.enabled"
   else
+    ev probe "spctl --status"; ev_raw enabled false
     fail "Gatekeeper is disabled" "Run: sudo spctl --master-enable" "system.gatekeeper.enabled"
   fi
 
   FV_STATUS=$(fdesetup status 2>/dev/null || echo "unknown")
   if echo "$FV_STATUS" | grep -q "FileVault is On"; then
+    ev probe "fdesetup status"; ev state on
     pass "FileVault is on (full-disk encryption active)" "system.filevault.on"
   elif echo "$FV_STATUS" | grep -q "Off"; then
+    ev probe "fdesetup status"; ev state off
     fail "FileVault is OFF" "Enable: System Settings → Privacy & Security → FileVault → Turn On" "system.filevault.on"
   else
+    ev probe "fdesetup status"; ev state unknown
     warn "FileVault state unknown" "Run manually: fdesetup status" "system.filevault.on"
   fi
 
@@ -2843,6 +2902,19 @@ section_11_ssh() {
   authsock=$(_status_of "ssh.authsock")
   ext_agent=false
   [[ "$agent" == "pass" || "$authsock" == "pass" ]] && ext_agent=true
+  # Evidence: the two facts this verdict is derived from — the on-disk key state
+  # and whether an external agent (1Password / Secretive) holds them. Both are
+  # non-identifying enums/booleans, safe under --redact.
+  key_state=unknown
+  if [[ "$no_keys" == "pass" ]]; then
+    key_state=none
+  elif [[ "$unenc" == "warn" || "$unenc" == "fail" ]]; then
+    key_state=unencrypted
+  elif [[ "$enc" == "pass" ]]; then
+    key_state=encrypted
+  fi
+  ev key_state "$key_state"
+  ev_raw external_agent "$ext_agent"
   # Accept both warn and fail for ssh.keys.unencrypted: under --profile=web3
   # or --profile=paranoid, the row is rewritten warn → fail by _apply_profile,
   # which is exactly the case this composite is most meant to catch. Reading
@@ -3328,6 +3400,12 @@ section_13_supply_chain() {
   scanner_state=$(_status_of supply.scanner)
   scanner_open=false
   case "$scanner_state" in warn | fail) scanner_open=true ;; esac
+  # Evidence: how many of npm/yarn/pnpm still run install scripts, and whether a
+  # supply-chain scanner (Socket etc.) is present. Counts/booleans only.
+  scanner_present=false
+  [[ "$scanner_state" == "pass" ]] && scanner_present=true
+  ev_raw managers_running_scripts "$scripts_open"
+  ev_raw scanner_present "$scanner_present"
   if [[ "$scripts_open" -eq 0 && "$scanner_state" == "pass" ]]; then
     pass "Supply-chain posture: scripts disabled by default and a scanner is in place" "supply.posture"
   elif [[ "$scripts_open" -ge 2 ]] && $scanner_open; then
@@ -3938,6 +4016,12 @@ section_18_backups() {
   # canonical signal that Drive is provisioned for this user.
   have_icloud=false
   [[ -d "$HOME/Library/Mobile Documents/com~apple~CloudDocs" ]] && have_icloud=true
+
+  # Evidence: which of the three recovery sources are present. Booleans only —
+  # no destination names or paths, safe under --redact.
+  ev_raw time_machine "$have_tm"
+  ev_raw offsite "$have_offsite"
+  ev_raw icloud_drive "$have_icloud"
 
   if $have_tm && $have_offsite; then
     if $have_icloud; then
@@ -6194,7 +6278,14 @@ _build_json_document() {
     el=$(_json_escape "${ROW_LABEL[$i]}")
     eh=$(_json_escape "${ROW_HINT[$i]}")
     [[ -n "$JSON_BODY" ]] && JSON_BODY="$JSON_BODY,"
-    JSON_BODY="$JSON_BODY{\"id\":\"$eid\",\"status\":\"${ROW_STATUS[$i]}\",\"label\":\"$el\",\"hint\":\"$eh\"}"
+    # Optional `evidence` object (v1.7): the staged inner body wrapped in braces,
+    # appended only when the check attached one. Additive and non-breaking —
+    # consumers that ignore it see the same id/status/label/hint row as before.
+    if [[ -n "${ROW_EVIDENCE[$i]:-}" ]]; then
+      JSON_BODY="$JSON_BODY{\"id\":\"$eid\",\"status\":\"${ROW_STATUS[$i]}\",\"label\":\"$el\",\"hint\":\"$eh\",\"evidence\":{${ROW_EVIDENCE[$i]}}}"
+    else
+      JSON_BODY="$JSON_BODY{\"id\":\"$eid\",\"status\":\"${ROW_STATUS[$i]}\",\"label\":\"$el\",\"hint\":\"$eh\"}"
+    fi
   done
   JSON_HOST=$(_json_escape "$(redact host "$(hostname)")")
   JSON_MACOS=$(_json_escape "$MACOS_VER")

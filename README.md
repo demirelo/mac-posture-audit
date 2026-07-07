@@ -264,7 +264,7 @@ The Bats suite sources the script as a library with fixtures/mocked macOS CLIs f
 
 v1.x is the public-release line. Possible directions:
 
-- **Evidence fields** in JSON rows so consumers get structured detail without scraping labels.
+- **Evidence fields** in JSON rows so consumers get structured detail without scraping labels. *(Started in v1.7.0 — an optional, redaction-safe `evidence` object on a representative subset of checks; see [docs/schema.md → Evidence](docs/schema.md#evidence-added-v170). More checks to follow.)*
 - **`--deep` mode** — slower, opt-in scan across project directories with explicit excludes and redaction-safe output.
 - **Signed release artifacts** with published checksums.
 - **Continuous snapshot mode** that stores JSON locally and alerts on newly-introduced failures.

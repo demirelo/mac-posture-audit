@@ -4,14 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-Project-hygiene and supply-chain-of-the-repo hardening only. **The auditor
-itself is unchanged** — `mac-posture-audit.sh` is byte-identical to v1.6.0, the
-checks, terminal/JSON/Markdown output, and schema are all the same, so there is
-no `SCRIPT_VERSION` bump. These entries will fold into the next behavioral
-release's notes.
+The first behavioral change since v1.6.0, plus the accumulated repo hardening
+that was waiting on one. `SCRIPT_VERSION` is bumped to **1.7.0** for the new
+JSON `evidence` fields — an **additive, schema-compatible** change (a consumer
+that ignores `evidence` sees the exact pre-v1.7 row). The remaining entries are
+the supply-chain-of-the-repo hardening that had queued up under this heading.
 
 ### Added
 
+- **JSON `evidence` fields** — result rows may now carry an optional `evidence`
+  object: the machine-checked facts a row's status was derived from (counts,
+  booleans, fixed enums), so a consumer — increasingly an LLM pointed at the
+  `--json` output — can reason on structured data instead of scraping the prose
+  `label`. Shipped for a representative first subset (`system.sip.enabled`,
+  `system.gatekeeper.enabled`, `system.filevault.on`, `ssh.posture`,
+  `supply.posture`, `backup.recovery_path`); more checks to follow. Flat scalars
+  only (so the stock-shell `--diff`/`--trend` parsers stay correct),
+  redaction-safe by construction (emitted the same under `--redact`), and
+  fully additive — absent on rows that don't stage it, and the `results[]`
+  shape is otherwise unchanged. Staged at the check site via `ev` / `ev_raw`,
+  consumed once per row by `_record`. Schema + per-check table:
+  [`docs/schema.md`](docs/schema.md#evidence-added-v170); agent guidance:
+  [`docs/AGENTS.md`](docs/AGENTS.md).
 - **OpenSSF Scorecard** — `scorecard.yml` workflow + README badge, publishing to the public Scorecard API. Score moved 3.9 → 7.5 over a hardening pass.
 - **Signed releases** — `release.yml` builds a release tarball on every `v*` tag (and on demand via `workflow_dispatch`), signs it with Sigstore-cosign keyless OIDC (`.sigstore` bundle), and attaches an SLSA build-provenance attestation (`.intoto.jsonl`) + a SHA-256 sum. Pairs with the existing SSH-signed git tag. v1.6.0 was back-filled with signed assets.
 - **CodeQL** — `codeql.yml` static analysis over the Python surface (`tools/render_report.py` + test helpers). The audit script stays covered by shellcheck + the read-only tripwire.

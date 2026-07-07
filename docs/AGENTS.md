@@ -8,7 +8,7 @@ The script that produces the data is deliberately *under-opinionated*. It emits 
 
 1. Run `mac-posture-audit.sh --json --quick --redact > posture.json` (or read a saved file). Schema: [`schema.md`](schema.md).
 2. Identify the user's threat model from context (their work, their tools, their stated concerns). If unknown, ask one clarifying question rather than assume.
-3. Walk the rows by `id`. Hard `fail` rows are unconditional — surface them first.
+3. Walk the rows by `id`. Hard `fail` rows are unconditional — surface them first. Where a row carries an `evidence` object (v1.7+), reason on those structured facts rather than parsing the `label`.
 4. Look for the **composite patterns** in §3 below. These are places where the audit is intentionally split across multiple rows because the meaning depends on combinations the script can't safely opinionate on.
 5. Frame your output around what *this user* should do, not what's generically recommended. Cite specific row IDs in your reasoning so the user can verify.
 
@@ -297,6 +297,7 @@ Each result row in the JSON has these fields:
 | `status` | yes | One of `pass`, `warn`, `fail`, `skip`. |
 | `label` | yes | Human-readable summary. May be reworded across versions. |
 | `hint` | yes (often `""`) | Remediation pointer. |
+| `evidence` | no (v1.7+) | Optional object of the machine-checked facts the status was derived from — counts, booleans, fixed enums. Present only on the subset of checks that stage it. **Prefer this over parsing the `label`** when it's there: `ssh.posture` gives you `{"key_state":"unencrypted","external_agent":false}`, `supply.posture` gives you `{"managers_running_scripts":2,"scanner_present":false}`, and you can reason on those directly. Absent ≠ error; fall back to the label. Redaction-safe, so it's present under `--redact` too. Full per-check table: [schema.md → Evidence](schema.md#evidence-added-v170). |
 
 Top-level: `host`, `macos`, `arch`, `summary` (now incl. `total`), `executive_verdict`, `top_risks` (each entry carries an `effort` hint as of v1.5.0), `results` — the verdict/top_risks/total trio added in v1.3.0 (additive). Full schema: [`schema.md`](schema.md).
 
