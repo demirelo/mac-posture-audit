@@ -33,12 +33,21 @@ set -uo pipefail
 SCRIPT_VERSION="1.7.0"
 
 # ── State ───────────────────────────────────────────────────────────────────
+# Every array below uses plain `X=()` assignment rather than `declare -a X`:
+# the bats harness sources this script from inside a function (helpers.bash
+# load_script), and `declare` inside a function creates function-LOCAL vars that
+# vanish on return — leaving `${#ARR[@]}` unbound under `set -u` for any array
+# a run never appends to (e.g. RANK_* on an all-pass machine). Plain assignment
+# always creates globals. Do not convert these back to `declare -a`.
 PASS_N=0
 WARN_N=0
 FAIL_N=0
 SKIP_N=0
-declare -a RESULTS_PASS RESULTS_WARN RESULTS_FAIL RESULTS_SKIP
-declare -a JSON_ROWS
+RESULTS_PASS=()
+RESULTS_WARN=()
+RESULTS_FAIL=()
+RESULTS_SKIP=()
+JSON_ROWS=()
 
 # ── Risk-ranking state (v1.3) ───────────────────────────────────────────────
 # Parallel arrays — one entry per emitted warn/fail row — feed the profile-aware
@@ -46,7 +55,10 @@ declare -a JSON_ROWS
 # never ranked, so they are not stored here. RANK_LABEL/RANK_HINT keep the raw
 # fields so the text renderer can format "label — hint" and the JSON top_risks
 # block can emit them as separate escaped strings.
-declare -a RANK_ID RANK_STATUS RANK_LABEL RANK_HINT
+RANK_ID=()
+RANK_STATUS=()
+RANK_LABEL=()
+RANK_HINT=()
 
 # ── Full row store (v1.4) ───────────────────────────────────────────────────
 # Every emitted row (any status), in emission order, so the Markdown report
@@ -55,14 +67,21 @@ declare -a RANK_ID RANK_STATUS RANK_LABEL RANK_HINT
 # ROW_EVIDENCE (v1.7) holds the inner body of each row's optional `evidence`
 # object (a comma-joined list of `"key":value` pairs, or "" for none). Kept
 # index-aligned with ROW_ID so _build_json_document can emit it verbatim.
-declare -a ROW_ID ROW_STATUS ROW_LABEL ROW_HINT ROW_EVIDENCE
+ROW_ID=()
+ROW_STATUS=()
+ROW_LABEL=()
+ROW_HINT=()
+ROW_EVIDENCE=()
 
 # ── Exposure catalog state ──────────────────────────────────────────────────
 # Parallel arrays — bash 3.2 has no associative arrays. Populated by
 # load_exposure_catalog when --exposure-catalog is passed.
 EXPOSURE_CATALOG_PATH=""
 CATALOG_LOADED=false
-declare -a CATALOG_CATEGORIES CATALOG_NAMES CATALOG_SEVERITIES CATALOG_IDS
+CATALOG_CATEGORIES=()
+CATALOG_NAMES=()
+CATALOG_SEVERITIES=()
+CATALOG_IDS=()
 
 # ── Args ────────────────────────────────────────────────────────────────────
 parse_args() {
