@@ -1173,30 +1173,37 @@ section_01_system_integrity() {
   section "01 · System Integrity (Disk & Boot)"
 
   if csrutil status 2>/dev/null | grep -qi "enabled"; then
-    ev probe "csrutil status"; ev_raw enabled true
+    ev probe "csrutil status"
+    ev_raw enabled true
     pass "SIP (System Integrity Protection) is enabled" "system.sip.enabled"
   else
-    ev probe "csrutil status"; ev_raw enabled false
+    ev probe "csrutil status"
+    ev_raw enabled false
     fail "SIP is disabled" "Re-enable from Recovery Mode: csrutil enable" "system.sip.enabled"
   fi
 
   if spctl --status 2>/dev/null | grep -qi "assessments enabled"; then
-    ev probe "spctl --status"; ev_raw enabled true
+    ev probe "spctl --status"
+    ev_raw enabled true
     pass "Gatekeeper is enabled" "system.gatekeeper.enabled"
   else
-    ev probe "spctl --status"; ev_raw enabled false
+    ev probe "spctl --status"
+    ev_raw enabled false
     fail "Gatekeeper is disabled" "Run: sudo spctl --master-enable" "system.gatekeeper.enabled"
   fi
 
   FV_STATUS=$(fdesetup status 2>/dev/null || echo "unknown")
   if echo "$FV_STATUS" | grep -q "FileVault is On"; then
-    ev probe "fdesetup status"; ev state on
+    ev probe "fdesetup status"
+    ev state on
     pass "FileVault is on (full-disk encryption active)" "system.filevault.on"
   elif echo "$FV_STATUS" | grep -q "Off"; then
-    ev probe "fdesetup status"; ev state off
+    ev probe "fdesetup status"
+    ev state off
     fail "FileVault is OFF" "Enable: System Settings → Privacy & Security → FileVault → Turn On" "system.filevault.on"
   else
-    ev probe "fdesetup status"; ev state unknown
+    ev probe "fdesetup status"
+    ev state unknown
     warn "FileVault state unknown" "Run manually: fdesetup status" "system.filevault.on"
   fi
 
