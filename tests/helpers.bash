@@ -60,6 +60,8 @@ reset_state() {
   ROW_STATUS=()
   ROW_LABEL=()
   ROW_HINT=()
+  ROW_EVIDENCE=()
+  _EV=""
   REPORT_FORMAT=""
   SNAPSHOT=false
   TREND=false

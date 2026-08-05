@@ -36,7 +36,10 @@
       "id":     "string",   // stable id, unique within a single run
       "status": "pass|warn|fail|skip",
       "label":  "string",   // human-readable summary
-      "hint":   "string"    // remediation pointer; may be empty
+      "hint":   "string",   // remediation pointer; may be empty
+      "evidence": {          // OPTIONAL, added v1.7.0 — see "Evidence" below.
+        "…": "scalar"       // present only on checks that stage it; flat
+      }                      //   object of strings / integers / booleans.
     }
   ]
 }
@@ -49,9 +52,44 @@
 - **`results[].status`** — one of the four enum values. Profiles (see `--profile`) can rewrite a status from one enum value to another (e.g. `warn → fail` under `web3` for `ext.wallet`); they cannot introduce new statuses.
 - **`results[].label`** — opaque to consumers. Only `id` is stable; `label` may be reworded between versions.
 - **`results[].hint`** — may be empty (`""`) for `pass` and uninformative `skip` rows.
+- **`results[].evidence`** *(added v1.7.0)* — an **optional** object carrying the machine-checked facts the row's status was derived from. **Absent** on most rows; present only on checks that stage it (a growing subset — see the [Evidence](#evidence-added-v170) section). A flat object of scalar values (string / integer / boolean); no nested objects or arrays, so the stock-shell `--diff` parser is never confused. Values are redaction-safe by construction (counts, booleans, fixed enums) and are emitted regardless of `--redact`. Additive and non-breaking: a consumer that ignores `evidence` sees exactly the pre-v1.7 row.
 - **`summary.total`** *(added v1.3.0)* — equals `len(results)` and the sum of the four counters.
 - **`executive_verdict`** *(added v1.3.0)* — `tier` is the action-priority level (the highest tier present in `top_risks`, or `none` when there are no warn/fail rows). `text` is opaque human prose (reworded freely across versions). `top_counts` sums the ranked tiers.
 - **`top_risks`** *(added v1.3.0)* — the warn/fail rows ranked by action priority; `rank` is 1-based and contiguous, ordered urgent→high→medium→low. Capped by `--top N` (default 7); `--top 0` yields `[]`. `pass`/`skip` rows never appear. Always an array, never absent. Each entry carries an **`effort`** *(added v1.5.0)* hint (`low`/`medium`/`high`) for impact-per-effort triage.
+
+## Evidence *(added v1.7.0)*
+
+Some rows carry an optional `evidence` object: the small set of facts the status was computed from, so a consumer (increasingly an LLM — see [AGENTS.md](AGENTS.md)) can act on structured data instead of scraping the prose `label`. This is the roadmap's "evidence fields" item — the thing that makes "point an AI agent at the JSON" produce good synthesis rather than label-matching.
+
+Design rules:
+
+- **Optional and additive.** Absent on rows that don't stage it. Consumers must treat a missing `evidence` as "no structured detail available," never as an error.
+- **Flat scalars only.** Each value is a JSON string, integer, or boolean. No nested objects or arrays — this keeps the stock-shell `--diff` and `--trend` parsers (which split rows on `},{`) correct.
+- **Redaction-safe by construction.** Evidence holds counts, booleans, and fixed enums — never hostnames, brands, paths, or usernames — so it is emitted the same with or without `--redact`.
+- **`id` remains the contract.** Evidence keys for a given `id` are stable within a major version but, like `label`, are additive: new keys may appear. Don't hard-fail on an unexpected key.
+
+Checks that emit evidence today (the representative first set; more will follow):
+
+| id | evidence keys |
+|---|---|
+| `system.sip.enabled` | `probe` (string), `enabled` (bool) |
+| `system.gatekeeper.enabled` | `probe` (string), `enabled` (bool) |
+| `system.filevault.on` | `probe` (string), `state` (`on`/`off`/`unknown`) |
+| `ssh.posture` | `key_state` (`none`/`encrypted`/`unencrypted`/`unknown`), `external_agent` (bool) |
+| `supply.posture` | `managers_running_scripts` (int 0–3), `scanner_present` (bool) |
+| `backup.recovery_path` | `time_machine` (bool), `offsite` (bool), `icloud_drive` (bool) |
+
+Example row:
+
+```json
+{
+  "id": "ssh.posture",
+  "status": "fail",
+  "label": "SSH posture: unencrypted on-disk keys with no external agent",
+  "hint": "Either add a passphrase … or move to an external SSH agent …",
+  "evidence": { "key_state": "unencrypted", "external_agent": false }
+}
+```
 
 ## ID grammar
 
