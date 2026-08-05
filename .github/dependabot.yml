@@ -2,13 +2,18 @@
 # This repo has no language package manifests (it's a single-file shell
 # script + opt-in Python companion with stdlib only), so only the
 # github-actions ecosystem is enrolled here.
+#
+# Updates are grouped into a single monthly PR: with every workflow SHA-pinned
+# and Scorecard enforcing that, individual weekly bumps produce a wall of
+# all-bot PRs that reads as "unmaintained" to a visitor. One batched PR per
+# month keeps the actions current without the noise.
 
 version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     commit-message:
       prefix: "chore"
       include: "scope"
@@ -16,3 +21,7 @@ updates:
       - "dependencies"
       - "github-actions"
     open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"

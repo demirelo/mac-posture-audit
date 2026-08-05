@@ -7,6 +7,22 @@
 
 A read-only, single-file shell script that audits a macOS machine's security posture and prints a colored report. Runs in seconds, makes no changes, and needs nothing beyond what ships with macOS.
 
+## Install
+
+```bash
+# Homebrew (coming — see packaging/homebrew):
+brew install demirelo/tap/mac-posture-audit
+
+# Or just clone — it's one file (recommended: read it first, see below):
+git clone https://github.com/demirelo/mac-posture-audit
+```
+
+> The `brew` one-liner installs the signed, SHA-256-pinned release tarball. The
+> tap (`demirelo/homebrew-tap`) is not published yet — the ready-to-use formula
+> and the one-time publish steps live in
+> [`packaging/homebrew/`](packaging/homebrew/). Until the tap is live, use the
+> `git clone` path below.
+
 ## Inspect before running
 
 Don't run security tooling on trust alone — it's one shell script, so read it first.

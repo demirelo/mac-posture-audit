@@ -16,12 +16,14 @@ release's notes.
 - **Signed releases** — `release.yml` builds a release tarball on every `v*` tag (and on demand via `workflow_dispatch`), signs it with Sigstore-cosign keyless OIDC (`.sigstore` bundle), and attaches an SLSA build-provenance attestation (`.intoto.jsonl`) + a SHA-256 sum. Pairs with the existing SSH-signed git tag. v1.6.0 was back-filled with signed assets.
 - **CodeQL** — `codeql.yml` static analysis over the Python surface (`tools/render_report.py` + test helpers). The audit script stays covered by shellcheck + the read-only tripwire.
 - **ClusterFuzzLite + Atheris fuzzing** — `.clusterfuzzlite/` harness fuzzes `tools/render_report.py` against malformed/hostile JSON (PR 60s, batch 30min/6h, weekly prune+coverage).
-- **Dependabot** — weekly `github-actions` updates so the SHA-pinned actions stay current.
+- **Dependabot** — `github-actions` updates so the SHA-pinned actions stay current (now grouped monthly — see Changed).
 - **Branch protection** on `main` — required status check (`Read-only audit checks`), linear history, no force-push/deletion, admin-enforced.
+- **Homebrew packaging** — a ready-to-publish, SHA-256-pinned formula for the signed v1.6.0 release tarball under [`packaging/homebrew/`](packaging/homebrew/), plus a README **Install** section with the `brew install demirelo/tap/mac-posture-audit` one-liner (marked "coming" until the `demirelo/homebrew-tap` repo is created — one-time publish steps in `packaging/homebrew/README.md`). Ends git-clone-only as the sole install path.
 
 ### Changed
 
 - **Hardened CI** — least-privilege `permissions:` on every workflow token; all GitHub Actions, the OSS-Fuzz base image (sha256 digest), and the pinned `atheris` (hash-pinned via `--require-hashes`) are fully pinned, so Scorecard's Pinned-Dependencies is clean.
+- **Dependabot grouped monthly** — `github-actions` bumps now land as one batched PR per month (`schedule.interval: monthly` + a `groups: github-actions` catch-all) instead of a weekly stream of single-action PRs, so the open-PR list stays quiet without falling behind on pinned SHAs.
 - Renamed the read-only tripwire's negative fixtures (`tests/check-read-only/should_fail/*.sh` → extensionless, shebang stripped) so Scorecard's shell parser ignores the intentional `curl | bash` / `npm install` bait. The tripwire greps file content, so the negative tests are unaffected.
 
 ## [1.6.0] - 2026-05-26
