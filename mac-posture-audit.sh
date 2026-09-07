@@ -2731,14 +2731,24 @@ _check_ssh_config_risky_options() {
     skip "~/.ssh/config not present" "" "ssh.config.risky_options"
     return
   fi
-  local in_global_scope=true line stripped host_pattern issues=()
-  while IFS= read -r line; do
-    # Strip leading whitespace + trailing comment for matching only.
-    stripped="${line#"${line%%[![:space:]]*}"}"
-    [[ -z "$stripped" || "$stripped" == \#* ]] && continue
+  local in_global_scope=true line stripped keyword value host_pattern issues=()
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Strip trailing comments and leading whitespace for matching only.
+    stripped="${line%%#*}"
+    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+    [[ -z "$stripped" ]] && continue
+    # Keywords are case-insensitive; arguments follow whitespace or an
+    # optional equals sign surrounded by whitespace. Preserve argument case.
+    keyword="${stripped%%[[:space:]=]*}"
+    value="${stripped#"$keyword"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value#=}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    keyword=$(printf '%s' "$keyword" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+    stripped="$keyword $value"
     # Section break: a `Host` or `Match` line starts a new scope.
-    if [[ "$stripped" =~ ^[Hh]ost[[:space:]]+(.*)$ ]]; then
-      host_pattern="${BASH_REMATCH[1]}"
+    if [[ "$keyword" == "host" ]]; then
+      host_pattern="$value"
       # Whether the new section applies broadly. Two patterns:
       #   - starts with a bare `*` (e.g. "Host *", "Host * !ignored.tld")
       #   - contains ` *` somewhere (e.g. "Host alpha *" or "Host alpha *.example")
@@ -2750,11 +2760,11 @@ _check_ssh_config_risky_options() {
       esac
       continue
     fi
-    if [[ "$stripped" =~ ^[Mm]atch[[:space:]]+all([[:space:]]|$) ]]; then
+    if [[ "$stripped" =~ ^match[[:space:]]+[Aa][Ll][Ll]([[:space:]]|$) ]]; then
       in_global_scope=true
       continue
     fi
-    if [[ "$stripped" =~ ^[Mm]atch[[:space:]]+ ]]; then
+    if [[ "$keyword" == "match" ]]; then
       in_global_scope=false
       continue
     fi
@@ -2788,7 +2798,7 @@ _check_ssh_config_risky_options() {
     esac
   done
   if [[ "$REDACT" == "true" ]]; then
-    warn "${#dedup[@]} risky option(s) in global / Host * scope of ~/.ssh/config" "Each applies to every host you SSH into. ForwardAgent yes exposes your 1Password/ssh-agent socket to compromise on any destination; StrictHostKeyChecking no defeats MITM detection; UserKnownHostsFile /dev/null discards the record so subsequent MITMs aren't flagged either. Move these into per-host blocks if you actually need them." "ssh.config.risky_options"
+    warn "${#dedup[@]} risky option(s) in global / Host * scope of ~/.ssh/config" "Review ~/.ssh/config: disable agent forwarding by default, require host-key verification, and retain known-host records. Restrict any necessary exceptions to explicitly trusted per-host blocks." "ssh.config.risky_options"
   else
     warn "Risky options in global / Host * scope of ~/.ssh/config: ${dedup[*]}" "Each applies to every host you SSH into. ForwardAgent yes exposes your 1Password/ssh-agent socket to compromise on any destination; StrictHostKeyChecking no defeats MITM detection; UserKnownHostsFile /dev/null discards the record so subsequent MITMs aren't flagged either. Move these into per-host blocks if you actually need them." "ssh.config.risky_options"
   fi
@@ -4640,7 +4650,7 @@ section_22_persistence_tcc() {
   done
   if [[ ${#REMOTE_ACCESS_FOUND[@]} -gt 0 ]]; then
     if [[ "$REDACT" == "true" ]]; then
-      warn "Remote-access app(s) installed: ${#REMOTE_ACCESS_FOUND[@]} found" "Remote-control tools (AnyDesk / TeamViewer / etc.) are central to crypto-drainer playbooks: attacker tricks user into installing one and granting Accessibility + Screen Recording. If you don't actively use these for sysadmin work, uninstall." "apps.remote_access.present"
+      warn "Remote-access app(s) installed: ${#REMOTE_ACCESS_FOUND[@]} found" "Remote-control tools can enable attackers to control your Mac after tricking you into granting Accessibility + Screen Recording. Uninstall tools you don't actively use for remote administration. Revoke stale permissions in System Settings → Privacy & Security → Accessibility / Screen Recording." "apps.remote_access.present"
     else
       warn "Remote-access app(s) installed: ${REMOTE_ACCESS_FOUND[*]}" "Remote-control tools (AnyDesk / TeamViewer / etc.) are central to crypto-drainer playbooks: attacker tricks user into installing one and granting Accessibility + Screen Recording. If you don't actively use these for sysadmin work, uninstall. Also revoke any stale TCC grants (System Settings → Privacy & Security → Accessibility / Screen Recording)." "apps.remote_access.present"
     fi
