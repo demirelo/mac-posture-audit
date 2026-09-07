@@ -745,6 +745,18 @@ _json_escape() {
   s=${s//$'\t'/\\t}
   s=${s//$'\b'/\\b}
   s=${s//$'\f'/\\f}
+  # Bash variables cannot contain NUL; escape every other JSON control byte.
+  # Keep the conventional short escapes above for backwards-compatible output.
+  local code byte escaped
+  for ((code = 1; code < 32; code++)); do
+    case "$code" in
+    8 | 9 | 10 | 12 | 13) continue ;;
+    esac
+    printf -v byte '\\%03o' "$code"
+    printf -v byte '%b' "$byte"
+    printf -v escaped '\\u%04x' "$code"
+    s=${s//"$byte"/"$escaped"}
+  done
   printf '%s' "$s"
 }
 
@@ -6055,50 +6067,90 @@ run_all_sections() {
 }
 
 _diff_parse_rows() {
-  # _diff_parse_rows SOURCE_NAME
-  # Reads one mac-posture-audit JSON document from stdin and emits
-  # "id status" lines. This is deliberately small and schema-specific so
-  # --diff does not depend on python3/jq/node.
-  local source="$1" compact rows split_rows obj id status seen idx
-  compact=$(cat | tr '\n' ' ' | sed 's/[[:space:]]//g') || return 2
-  if [[ "$compact" != *'"results":['* ]]; then
-    printf -- '--diff: %s JSON must contain a results array\n' "$source" >&2
-    return 2
-  fi
-  rows=$(printf '%s' "$compact" | sed -E 's/^.*"results":\[(.*)\]\}.*$/\1/')
-  if [[ "$rows" == "$compact" ]]; then
-    printf -- '--diff: %s JSON must contain a results array\n' "$source" >&2
-    return 2
-  fi
-  [[ -z "$rows" ]] && return 0
+  # Parse with stock macOS JXA/Foundation; stdin is data, never executable code.
+  # Buffer all rows until the complete document and required fields validate.
+  # IDs use JSON string interiors, with spaces escaped, as lossless row tokens:
+  # ordinary check IDs stay unchanged and arbitrary strings cannot split rows.
+  /usr/bin/osascript -l JavaScript -e '
+ObjC.import("Foundation");
+function run(argv) {
+  function invalid(message) {
+    throw new Error("--diff: " + argv[0] + " " + message);
+  }
+  var data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
+  var input = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
+  if (input.isNil()) invalid("JSON must be UTF-8");
+  var text = ObjC.unwrap(input), doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (error) {
+    invalid("malformed JSON");
+  }
+  if (doc === null || typeof doc !== "object" || Array.isArray(doc) ||
+      !Object.prototype.hasOwnProperty.call(doc, "results") ||
+      !Array.isArray(doc.results)) {
+    invalid("JSON must contain a results array");
+  }
 
-  split_rows=$(printf '%s' "$rows" | sed 's/},{/}\
-{/g')
-  seen=" "
-  idx=0
-  while IFS= read -r obj; do
-    [[ -z "$obj" ]] && continue
-    id=$(printf '%s' "$obj" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-    status=$(printf '%s' "$obj" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
-    if [[ -z "$id" ]]; then
-      printf -- '--diff: %s results[%d].id must be a non-empty string\n' "$source" "$idx" >&2
-      return 2
-    fi
-    case "$status" in
-    pass | warn | fail | skip) ;;
-    *)
-      printf -- '--diff: %s results[%d].status must be pass|warn|fail|skip\n' "$source" "$idx" >&2
-      return 2
-      ;;
-    esac
-    if [[ "$seen" == *" $id "* ]]; then
-      printf -- '--diff: %s has duplicate id: %s\n' "$source" "$id" >&2
-      return 2
-    fi
-    seen="$seen$id "
-    printf '%s %s\n' "$id" "$status"
-    idx=$((idx + 1))
-  done <<<"$split_rows"
+  // JSON.parse validates the entire grammar but permits repeated object keys.
+  // Walk its validated tokens to reject ambiguous required fields before using
+  // the decoded document. Unknown additive members retain JSON.parse semantics.
+  var tokens = text.match(/"(?:[^"\\]|\\[\s\S])*"|[{}\[\]:,]|[^\s{}\[\]:,]+/g);
+  var pos = 0;
+  function walk(context) {
+    var token = tokens[pos++], key, seen = Object.create(null);
+    if (token === "{") {
+      while (tokens[pos] !== "}") {
+        key = JSON.parse(tokens[pos++]);
+        pos++; // colon
+        if ((context === "root" && key === "results") ||
+            (context === "row" && (key === "id" || key === "status"))) {
+          if (seen[key]) invalid("duplicate " + context + " member: " + key);
+          seen[key] = true;
+        }
+        walk(context === "root" && key === "results" ? "results" : "other");
+        if (tokens[pos] !== ",") break;
+        pos++;
+      }
+      pos++; // closing brace
+    } else if (token === "[") {
+      while (tokens[pos] !== "]") {
+        walk(context === "results" ? "row" : "other");
+        if (tokens[pos] !== ",") break;
+        pos++;
+      }
+      pos++; // closing bracket
+    }
+  }
+  walk("root");
+
+  var seen = Object.create(null), rows = [];
+  doc.results.forEach(function (row, index) {
+    var path = "results[" + index + "]";
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      invalid(path + " must be an object");
+    }
+    if (!Object.prototype.hasOwnProperty.call(row, "id") ||
+        typeof row.id !== "string" || row.id.length === 0) {
+      invalid(path + ".id must be a non-empty string");
+    }
+    if (!Object.prototype.hasOwnProperty.call(row, "status") ||
+        ["pass", "warn", "fail", "skip"].indexOf(row.status) === -1) {
+      invalid(path + ".status must be pass|warn|fail|skip");
+    }
+    if (Object.prototype.hasOwnProperty.call(seen, row.id)) {
+      invalid("has duplicate id: " + JSON.stringify(row.id));
+    }
+    seen[row.id] = true;
+    var id = JSON.stringify(row.id).slice(1, -1).replace(/ /g, "\\u0020");
+    rows.push(id + " " + row.status);
+  });
+  if (rows.length) {
+    var output = $(rows.join("\n") + "\n").dataUsingEncoding($.NSUTF8StringEncoding);
+    $.NSFileHandle.fileHandleWithStandardOutput.writeData(output);
+  }
+}
+' "$1" || return 2
 }
 
 _diff_lookup_status() {
@@ -6111,14 +6163,14 @@ _diff_lookup_status() {
       printf '%s' "$status"
       return 0
     fi
-  done <<<"$rows"
+  done < <(printf '%s\n' "$rows")
   printf ''
 }
 
 emit_diff() {
   # Compare current run's JSON_ROWS against the JSON file at $DIFF_PATH.
   # Prints one line per change. Exits 0 on no changes, 1 on any change,
-  # 2 on parse error. Runtime stays stock-shell only (no python3/jq/node).
+  # 2 on parse error. Runtime uses stock macOS facilities (no python3/jq/node).
   local current_body prev_pairs curr_pairs ids ident p c marker changes
   current_body=$(
     IFS=,
@@ -6147,7 +6199,7 @@ emit_diff() {
       esac
       printf '%s %s\t%s -> %s\n' "$marker" "$ident" "$p" "$c"
     fi
-  done <<<"$ids"
+  done < <(printf '%s\n' "$ids")
 
   if [[ "$changes" -eq 0 ]]; then
     echo "no posture changes"
@@ -6436,20 +6488,19 @@ run_trend() {
   fi
   first=$(printf '%s\n' "$files" | head -1)
   last=$(printf '%s\n' "$files" | tail -1)
+  # Capture and check both complete parses before any comparison or verdict.
+  local oldrows newrows oldrc=0 newrc=0
+  oldrows=$(_diff_parse_rows oldest <"$first") || oldrc=$?
+  newrows=$(_diff_parse_rows newest <"$last") || newrc=$?
+  [[ "$oldrc" -eq 0 && "$newrc" -eq 0 ]] || exit 2
+
   printf 'Posture trend — %d snapshots in %s\n' "$n" "$dir"
   printf '  oldest: %s\n  newest: %s\n\n' "$(basename "$first")" "$(basename "$last")"
 
-  local oldmap id st oldst improved=0 regressed=0 out=""
-  oldmap=" $(_diff_parse_rows oldest <"$first" | sed 's/ /=/' | tr '\n' ' ')"
+  local id st oldst improved=0 regressed=0 out=""
   while read -r id st; do
     [[ -z "$id" ]] && continue
-    oldst=""
-    case "$oldmap" in
-    *" $id="*)
-      oldst="${oldmap##*" $id="}"
-      oldst="${oldst%% *}"
-      ;;
-    esac
+    oldst=$(_diff_lookup_status "$oldrows" "$id")
     [[ -z "$oldst" || "$oldst" == "$st" ]] && continue
     if [[ "$(_status_rank "$st")" -lt "$(_status_rank "$oldst")" ]]; then
       improved=$((improved + 1))
@@ -6458,7 +6509,7 @@ run_trend() {
       regressed=$((regressed + 1))
       out="${out}  regressed  $id: $oldst -> $st"$'\n'
     fi
-  done < <(_diff_parse_rows newest <"$last")
+  done < <(printf '%s\n' "$newrows")
 
   printf 'Improved: %d   Regressed: %d\n' "$improved" "$regressed"
   if [[ -n "$out" ]]; then
