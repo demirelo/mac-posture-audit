@@ -44,6 +44,11 @@ for SEQ in 1 2 3 4 5 6 7 8 9 10 11 12; do maybe_write_snapshot || exit; done
             self.assertEqual(trend.returncode, 0, trend.stderr)
             self.assertIn('Improved: 1   Regressed: 0', trend.stdout)
             self.assertIn('synthetic.check: fail -> pass', trend.stdout)
+            for locale in ('C', 'en_US.UTF-8', 'de_CH.UTF-8'):
+                localized = shell('LC_ALL="$2"; export LC_ALL; MSA_HISTORY_DIR="$1"; run_trend', history, locale)
+                self.assertEqual(localized.returncode, 0, f"{locale}: {localized.stderr}")
+                self.assertIn('Improved: 1   Regressed: 0', localized.stdout, locale)
+                self.assertIn('synthetic.check: fail -> pass', localized.stdout, locale)
 
     def test_concurrent_same_second_snapshots_preserve_every_document(self):
         with tempfile.TemporaryDirectory() as temp:
