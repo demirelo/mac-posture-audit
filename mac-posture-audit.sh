@@ -5204,7 +5204,7 @@ _check_browser_extensions_inventory() {
     firefox_roots=("${BROWSER_EXT_FIREFOX_ROOTS_DEFAULT[@]}")
   fi
 
-  local total=0 suspicious_count=0 fail_count=0
+  local total=0 suspicious_count=0 fail_count=0 catalog_status=skip matched_status
   local -a suspicious_hits seen_ext
   suspicious_hits=()
   seen_ext=()
@@ -5244,6 +5244,11 @@ _check_browser_extensions_inventory() {
           match_id="${match##*|}"
           suspicious_count=$((suspicious_count + 1))
           [[ "$severity" == "critical" ]] && fail_count=$((fail_count + 1))
+          matched_status=$(_catalog_status_for "$severity")
+          case "$matched_status" in
+          fail) catalog_status=fail ;;
+          warn) [[ "$catalog_status" != "fail" ]] && catalog_status=warn ;;
+          esac
           suspicious_hits+=("${brand}:${ext_id}|${severity}|${match_id}")
         fi
       done
@@ -5276,6 +5281,11 @@ _check_browser_extensions_inventory() {
           match_id="${match##*|}"
           suspicious_count=$((suspicious_count + 1))
           [[ "$severity" == "critical" ]] && fail_count=$((fail_count + 1))
+          matched_status=$(_catalog_status_for "$severity")
+          case "$matched_status" in
+          fail) catalog_status=fail ;;
+          warn) [[ "$catalog_status" != "fail" ]] && catalog_status=warn ;;
+          esac
           suspicious_hits+=("${fx_brand}:${addon}|${severity}|${match_id}")
         fi
       done <<<"$addons"
@@ -5305,17 +5315,23 @@ _check_browser_extensions_inventory() {
       out="$out${entry%%|*} [$sev_label]"
     done
   fi
-  if [[ "$fail_count" -gt 0 ]]; then
+  if [[ "$catalog_status" == "fail" ]]; then
     if [[ "$REDACT" == "true" ]]; then
       fail "$suspicious_count browser extension(s) match exposure catalog (critical: $fail_count)" "Open the browser's extensions page, remove the matching IDs, and rotate any session tokens / wallet seed phrases that may have been exposed." "browser.extensions.suspicious"
     else
       fail "Catalog-matched browser extensions: $out" "Open the browser's extensions page, remove these IDs, and rotate any session tokens / wallet seed phrases that may have been exposed." "browser.extensions.suspicious"
     fi
-  else
+  elif [[ "$catalog_status" == "warn" ]]; then
     if [[ "$REDACT" == "true" ]]; then
       warn "$suspicious_count browser extension(s) match exposure catalog (informational)" "Review and remove the matching IDs if no longer trusted." "browser.extensions.suspicious"
     else
       warn "Catalog-matched browser extensions: $out" "Review the catalog-named extensions; remove if no longer trusted." "browser.extensions.suspicious"
+    fi
+  else
+    if [[ "$REDACT" == "true" ]]; then
+      skip "$suspicious_count browser extension(s) match exposure catalog (informational)" "Informational catalog match; review the matching IDs if no longer trusted." "browser.extensions.suspicious"
+    else
+      skip "Catalog-matched browser extensions: $out" "Informational catalog matches; review the catalog-named extensions if no longer trusted." "browser.extensions.suspicious"
     fi
   fi
 }
@@ -5347,7 +5363,7 @@ _check_editor_extensions() {
     editor_roots=("${EDITOR_EXT_ROOTS_DEFAULT[@]}")
   fi
 
-  local total=0 suspicious_count=0 fail_count=0
+  local total=0 suspicious_count=0 fail_count=0 catalog_status=skip matched_status
   local -a suspicious_hits seen_ext
   suspicious_hits=()
   seen_ext=()
@@ -5384,6 +5400,11 @@ _check_editor_extensions() {
         match_id="${match##*|}"
         suspicious_count=$((suspicious_count + 1))
         [[ "$severity" == "critical" ]] && fail_count=$((fail_count + 1))
+        matched_status=$(_catalog_status_for "$severity")
+        case "$matched_status" in
+        fail) catalog_status=fail ;;
+        warn) [[ "$catalog_status" != "fail" ]] && catalog_status=warn ;;
+        esac
         suspicious_hits+=("${editor}:${publisher_name}|${severity}|${match_id}")
       fi
     done
@@ -5412,17 +5433,23 @@ _check_editor_extensions() {
       out="$out${entry%%|*} [$sev_label]"
     done
   fi
-  if [[ "$fail_count" -gt 0 ]]; then
+  if [[ "$catalog_status" == "fail" ]]; then
     if [[ "$REDACT" == "true" ]]; then
       fail "$suspicious_count editor extension(s) match exposure catalog (critical: $fail_count)" "Uninstall: editor → Extensions → search → Uninstall. Restart the editor. If the extension had access to secrets or a wallet, rotate those credentials." "dev.editor_extensions.suspicious"
     else
       fail "Catalog-matched editor extensions: $out" "Uninstall: editor → Extensions → search → Uninstall. Restart the editor. Rotate credentials the extension might have accessed." "dev.editor_extensions.suspicious"
     fi
-  else
+  elif [[ "$catalog_status" == "warn" ]]; then
     if [[ "$REDACT" == "true" ]]; then
       warn "$suspicious_count editor extension(s) match exposure catalog (informational)" "Review and remove if no longer trusted." "dev.editor_extensions.suspicious"
     else
       warn "Catalog-matched editor extensions: $out" "Review the catalog-named extensions; remove if no longer trusted." "dev.editor_extensions.suspicious"
+    fi
+  else
+    if [[ "$REDACT" == "true" ]]; then
+      skip "$suspicious_count editor extension(s) match exposure catalog (informational)" "Informational catalog match; review the matching entries if no longer trusted." "dev.editor_extensions.suspicious"
+    else
+      skip "Catalog-matched editor extensions: $out" "Informational catalog matches; review the catalog-named extensions if no longer trusted." "dev.editor_extensions.suspicious"
     fi
   fi
 }
@@ -5468,7 +5495,7 @@ _check_mcp_servers() {
     fi
   fi
 
-  local total=0 unpinned=0 remote=0 launcher=0 fscap=0 suspicious_count=0 fail_count=0
+  local total=0 unpinned=0 remote=0 launcher=0 fscap=0 suspicious_count=0 fail_count=0 catalog_status=skip matched_status
   local any_config_found=false
   local webhook_provs=""
   local -a server_ids suspicious_hits
@@ -5563,6 +5590,11 @@ _check_mcp_servers() {
       match_id="${match##*|}"
       suspicious_count=$((suspicious_count + 1))
       [[ "$severity" == "critical" ]] && fail_count=$((fail_count + 1))
+      matched_status=$(_catalog_status_for "$severity")
+      case "$matched_status" in
+      fail) catalog_status=fail ;;
+      warn) [[ "$catalog_status" != "fail" ]] && catalog_status=warn ;;
+      esac
       suspicious_hits+=("${sid}|${severity}|${match_id}")
     fi
   done
@@ -5637,17 +5669,23 @@ _check_mcp_servers() {
       out="$out${entry%%|*} [$sev_label]"
     done
   fi
-  if [[ "$fail_count" -gt 0 ]]; then
+  if [[ "$catalog_status" == "fail" ]]; then
     if [[ "$REDACT" == "true" ]]; then
       fail "$suspicious_count MCP server(s) match exposure catalog (critical: $fail_count)" "Remove the matching entries from the host config and rotate any credentials passed to the server in its env block." "mcp.servers.suspicious"
     else
       fail "Catalog-matched MCP servers: $out" "Remove the matching entries from the host config and rotate any credentials passed to the server in its env block." "mcp.servers.suspicious"
     fi
-  else
+  elif [[ "$catalog_status" == "warn" ]]; then
     if [[ "$REDACT" == "true" ]]; then
       warn "$suspicious_count MCP server(s) match exposure catalog (informational)" "Review and remove if no longer trusted." "mcp.servers.suspicious"
     else
       warn "Catalog-matched MCP servers: $out" "Review the catalog-named servers; remove if no longer trusted." "mcp.servers.suspicious"
+    fi
+  else
+    if [[ "$REDACT" == "true" ]]; then
+      skip "$suspicious_count MCP server(s) match exposure catalog (informational)" "Informational catalog match; review the matching servers if no longer trusted." "mcp.servers.suspicious"
+    else
+      skip "Catalog-matched MCP servers: $out" "Informational catalog matches; review the catalog-named servers if no longer trusted." "mcp.servers.suspicious"
     fi
   fi
 }
