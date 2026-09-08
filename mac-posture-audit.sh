@@ -6504,7 +6504,8 @@ run_trend() {
     printf 'No snapshot history at %s — create snapshots with --snapshot first.\n' "$dir"
     exit 0
   fi
-  files=$(find "$dir" -maxdepth 1 -name 'posture-*.json' -type f 2>/dev/null | sort)
+  # Byte ordering keeps ".json" before padded collision suffixes in every locale.
+  files=$(find "$dir" -maxdepth 1 -name 'posture-*.json' -type f 2>/dev/null | LC_ALL=C sort)
   n=$(printf '%s' "$files" | grep -c . || true)
   [[ -z "$n" ]] && n=0
   if [[ "$n" -lt 2 ]]; then
