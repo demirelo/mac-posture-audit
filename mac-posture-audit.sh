@@ -747,6 +747,11 @@ _json_escape() {
   s=${s//$'\f'/\\f}
   # Bash variables cannot contain NUL; escape every other JSON control byte.
   # Keep the conventional short escapes above for backwards-compatible output.
+  # Common escapes leave ordinary strings free of these 26 control bytes.
+  if [[ "$s" != *[$'\001\002\003\004\005\006\007\013\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037']* ]]; then
+    printf '%s' "$s"
+    return
+  fi
   local code byte escaped
   for ((code = 1; code < 32; code++)); do
     case "$code" in
@@ -6396,19 +6401,39 @@ _build_json_document() {
 # --snapshot (which forces --redact), to the tool's own data dir — never to
 # system or user configuration. The default run remains fully read-only.
 maybe_write_snapshot() {
-  ${SNAPSHOT:-false} || return 0
-  local dir file
+  [[ "${SNAPSHOT:-false}" == "true" ]] || return 0
+  local dir file stem attempt=0 rc REDACT=true
   dir="${MSA_HISTORY_DIR:-$HOME/.mac-posture-audit/history}"
   mkdir -p "$dir" 2>/dev/null || {
     printf 'mac-posture-audit: could not create snapshot dir %s\n' "$dir" >&2
     return 0
   }
-  file="$dir/posture-$(date +%Y%m%d-%H%M%S).json"
-  if _build_json_document >"$file" 2>/dev/null; then
-    printf 'Snapshot written: %s\n' "$file" >&2
-  else
-    printf 'mac-posture-audit: could not write snapshot %s\n' "$file" >&2
-  fi
+  stem="$dir/posture-$(date +%Y%m%d-%H%M%S)"
+  file="$stem.json"
+  # "_" sorts after the original ".json"; padding preserves numeric order.
+  # Bound the suffix so it never outgrows that ordering.
+  while [[ "$attempt" -le 999999 ]]; do
+    rc=0
+    (
+      set -C
+      [[ ! -e "$file" && ! -L "$file" ]] || exit 3
+      # Reserve and retain the descriptor: never reopen a claimed pathname.
+      exec 3>"$file" || exit 3
+      [[ -f /dev/fd/3 ]] || exit 1
+      _build_json_document >&3 || exit 1
+    ) 2>/dev/null || rc=$?
+    case "$rc" in
+    0)
+      printf 'Snapshot written: %s\n' "$file" >&2
+      return 0
+      ;;
+    3) [[ -e "$file" || -L "$file" ]] || break ;;
+    *) break ;;
+    esac
+    attempt=$((attempt + 1))
+    printf -v file '%s_%06d.json' "$stem" "$attempt"
+  done
+  printf 'mac-posture-audit: could not write snapshot %s\n' "$file" >&2
 }
 
 # emit_markdown_report — v1.4 --report md: a shareable Markdown report
@@ -6479,7 +6504,8 @@ run_trend() {
     printf 'No snapshot history at %s — create snapshots with --snapshot first.\n' "$dir"
     exit 0
   fi
-  files=$(find "$dir" -maxdepth 1 -name 'posture-*.json' -type f 2>/dev/null | sort)
+  # Byte ordering keeps ".json" before padded collision suffixes in every locale.
+  files=$(find "$dir" -maxdepth 1 -name 'posture-*.json' -type f 2>/dev/null | LC_ALL=C sort)
   n=$(printf '%s' "$files" | grep -c . || true)
   [[ -z "$n" ]] && n=0
   if [[ "$n" -lt 2 ]]; then
