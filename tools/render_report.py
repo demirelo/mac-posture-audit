@@ -11,7 +11,7 @@ Python 3 that ships with macOS.
     # or pipe:
     ./mac-posture-audit.sh --json --redact | python3 tools/render_report.py > report.html
 
-Exit codes: 0 on success, 2 on usage/parse error.
+Exit codes: 0 on success, 2 on usage/parse/validation error.
 """
 
 from __future__ import annotations
@@ -53,7 +53,45 @@ def esc(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
+def validate(doc: object) -> None:
+    """Check consumed shapes while allowing absent optional fields and extensions."""
+    if not isinstance(doc, dict) or "results" not in doc:
+        raise ValueError("expected an object with results")
+
+    def scalars(obj: dict, fields: tuple, path: str) -> None:
+        for field in fields:
+            if isinstance(obj.get(field), (dict, list)):
+                raise ValueError(f"{path}.{field} must be a scalar")
+
+    scalars(doc, ("host", "macos", "arch"), "report")
+    for name, fields in (
+        ("summary", ("pass", "warn", "fail", "skip", "total")),
+        ("executive_verdict", ("profile", "tier", "text")),
+    ):
+        obj = doc.get(name, {})
+        if not isinstance(obj, dict):
+            raise ValueError(f"{name} must be an object")
+        scalars(obj, fields, name)
+
+    for name, fields in (
+        ("results", ("status", "id", "label")),
+        ("top_risks", ("tier", "rank", "id", "label")),
+    ):
+        rows = doc.get(name, [])
+        if not isinstance(rows, list):
+            raise ValueError(f"{name} must be an array")
+        for index, row in enumerate(rows):
+            path = f"{name}[{index}]"
+            if not isinstance(row, dict):
+                raise ValueError(f"{path} must be an object")
+            scalars(row, fields, path)
+            # Ranks are compared during sorting; mixed scalar types are unsafe.
+            if name == "top_risks" and type(row.get("rank", 0)) is not int:
+                raise ValueError(f"{path}.rank must be an integer")
+
+
 def render(doc: dict) -> str:
+    validate(doc)
     summary = doc.get("summary", {})
     verdict = doc.get("executive_verdict", {})
     top = sorted(
@@ -62,6 +100,7 @@ def render(doc: dict) -> str:
     )
     results = doc.get("results", [])
     tier = verdict.get("tier", "none")
+    tier_class = tier if tier in TIER_ORDER else "none"
 
     out: list[str] = []
     out.append("<!doctype html><html lang=en><head><meta charset=utf-8>")
@@ -79,22 +118,24 @@ def render(doc: dict) -> str:
     if verdict.get("text"):
         out.append(f"<p>{esc(verdict['text'])}</p>")
     out.append(
-        f'<p class="prio prio-{esc(tier)}">Action priority: {esc(tier)}</p></div>'
+        f'<p class="prio prio-{esc(tier_class)}">Action priority: {esc(tier)}</p></div>'
     )
     out.append(
-        f'<p class=meta>{summary.get("pass", 0)} pass · {summary.get("warn", 0)} warn · '
-        f'{summary.get("fail", 0)} fail · {summary.get("skip", 0)} skip '
-        f'({summary.get("total", len(results))} total)</p>'
+        f'<p class=meta>{esc(summary.get("pass", 0))} pass · {esc(summary.get("warn", 0))} warn · '
+        f'{esc(summary.get("fail", 0))} fail · {esc(summary.get("skip", 0))} skip '
+        f'({esc(summary.get("total", len(results)))} total)</p>'
     )
 
     out.append("<h2>Top risks to address</h2>")
     if top:
         out.append("<table><thead><tr><th>#</th><th>tier</th><th>id</th><th>finding</th></tr></thead><tbody>")
         for r in top:
-            t = esc(r.get("tier", ""))
+            risk_tier = r.get("tier", "")
+            t = esc(risk_tier)
+            risk_class = risk_tier if risk_tier in TIER_ORDER else "unknown"
             out.append(
                 f'<tr><td>{esc(r.get("rank", ""))}</td>'
-                f'<td><span class="tag tag-{t}">{t}</span></td>'
+                f'<td><span class="tag tag-{esc(risk_class)}">{t}</span></td>'
                 f'<td><code>{esc(r.get("id", ""))}</code></td>'
                 f'<td>{esc(r.get("label", ""))}</td></tr>'
             )
@@ -106,8 +147,9 @@ def render(doc: dict) -> str:
     out.append("<table><thead><tr><th>status</th><th>id</th><th>finding</th></tr></thead><tbody>")
     for r in results:
         st = r.get("status", "skip")
+        status_class = st if st in STATUS_LABEL else "unknown"
         out.append(
-            f'<tr><td class="s-{esc(st)}">{esc(STATUS_LABEL.get(st, st))}</td>'
+            f'<tr><td class="s-{esc(status_class)}">{esc(STATUS_LABEL.get(st, st))}</td>'
             f'<td><code>{esc(r.get("id", ""))}</code></td>'
             f'<td>{esc(r.get("label", ""))}</td></tr>'
         )
@@ -127,15 +169,21 @@ def main(argv: list[str]) -> int:
         print("usage: render_report.py [posture.json]  (or pipe JSON on stdin)", file=sys.stderr)
         return 2
     try:
-        raw = open(argv[1]).read() if len(argv) == 2 else sys.stdin.read()
+        if len(argv) == 2:
+            with open(argv[1], encoding="utf-8") as source:
+                raw = source.read()
+        else:
+            raw = sys.stdin.read()
         doc = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         print(f"render_report: could not read/parse input: {e}", file=sys.stderr)
         return 2
-    if not isinstance(doc, dict) or "results" not in doc:
-        print("render_report: input is not a mac-posture-audit JSON document", file=sys.stderr)
+    try:
+        report = render(doc)
+    except ValueError as e:
+        print(f"render_report: invalid input: {e}", file=sys.stderr)
         return 2
-    sys.stdout.write(render(doc))
+    sys.stdout.write(report)
     return 0
 
 
