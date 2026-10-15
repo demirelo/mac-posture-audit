@@ -10,11 +10,15 @@ of those controls is unverified.
 |---|---|
 | Operating system | `/usr/bin/sw_vers`: macOS 27.0.1, build 26A434 |
 | Architecture and shell | arm64, stock Bash 3.2.57 |
-| Complete local suite | 542 Bats tests, 56 Python tests, and 57 safety-checker fixtures passed on 2026-10-15. Bash syntax, ShellCheck, shfmt, the read-only tripwire, and diff whitespace checks passed. Workflow YAML also parsed successfully. |
+| Complete local suite | 562 Bats tests, 67 Python tests, and 57 safety-checker fixtures passed on 2026-10-15. Bash syntax, ShellCheck, shfmt, the read-only tripwire, and diff whitespace checks passed. Workflow YAML also parsed successfully. |
 | Host smoke test | A real read-only `--quick --json` run with a temporary home directory passed JSON structure, unique-ID, summary-count, TCC, and Background Security Improvements checks. |
 | Privileged checks | The automated results do not establish a full privileged audit or a complete inventory of managed-device permissions. |
 
-The complete run used Python 3.9.6. The hosted suite also found and corrected a
+The complete run used Apple's `/usr/bin/python3`, Python 3.9.6, supplied by
+Xcode on this Mac. CI selects the same Apple interpreter path and records the
+version supplied by its Xcode image. This does not require a Homebrew Python
+installation. Xcode or Command Line Tools must provide the interpreter; the
+version can change with those tools. The hosted suite also found and corrected a
 test assumption about JSON parser depth limits in Python 3.15; production code
 did not need a change for that difference.
 Use `./scripts/test.sh` for the complete test set in the current checkout. A
