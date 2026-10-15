@@ -35,7 +35,7 @@ and loads no external assets.
 ```bash
 umask 077
 ./mac-posture-audit.sh --offline --json --redact --profile normal > posture.json
-python3 tools/render_report.py posture.json --output report.html
+/usr/bin/python3 tools/render_report.py posture.json --output report.html
 ```
 
 The renderer refuses an existing output path. Use a new filename for each run.
@@ -191,7 +191,7 @@ The audit is read-only by default, but a few opt-in companions make the report p
 
 ```bash
 ./mac-posture-audit.sh --report md --redact > posture.md            # shareable Markdown (honors --redact)
-./mac-posture-audit.sh --json --redact | python3 tools/render_report.py --output report.html   # self-contained HTML, no deps
+./mac-posture-audit.sh --json --redact | /usr/bin/python3 tools/render_report.py --output report.html   # self-contained HTML, no deps
 ./mac-posture-audit.sh --snapshot                          # append a redacted JSON to ~/.mac-posture-audit/history/
 ./mac-posture-audit.sh --trend                             # summarize improved/regressed checks across snapshots
 ```
@@ -264,14 +264,18 @@ grep -En 'sudo|curl|gh |rm |mv |cp |chmod|chown|defaults|plutil|launchctl|kill|b
 ```bash
 brew install bats-core shellcheck shfmt
 
-./scripts/test.sh --check-tools
-./scripts/test.sh
+PATH="/usr/bin:$PATH" ./scripts/test.sh --check-tools
+PATH="/usr/bin:$PATH" ./scripts/test.sh
 ```
 
 The test runner checks syntax, ShellCheck, formatting, safety-checker fixtures, Bats tests, and Python tests. It gives Bats a temporary home directory. Section tests use fixtures. Some integration tests run real, read-only macOS probes in `--quick` mode; they check report structure, redaction, arguments, and counters.
 
-Tests require Python 3.9 or later. On Apple silicon, use arm64 or universal test
-tools. `--check-tools` checks whether each required tool can run before any
+On macOS, use Apple's `/usr/bin/python3` from Xcode or Command Line Tools.
+The macOS 27.0.1 validation used its Python 3.9.6; the macOS CI jobs also select
+`/usr/bin/python3` and record its version. A separate Python installation is not
+needed. The optional renderer and tests require Python 3.9 or later. The Linux
+fuzzing container has its own pinned runtime. On Apple silicon, use arm64 or
+universal test tools. `--check-tools` checks whether each required tool can run before any
 tests start. If a working version is already installed, put its directory first
 in `PATH`. See the [macOS 27 notes](docs/macOS-27.md) for Rosetta limits.
 

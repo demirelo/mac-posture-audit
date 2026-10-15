@@ -39,6 +39,14 @@ jobs:
       - name: Install test tools
         run: brew install bats-core shellcheck shfmt parallel
 
+      - name: Use Apple command-line Python
+        # Use the interpreter shipped with the runner's Xcode/Command Line Tools.
+        # Do not replace it with a Homebrew or setup-python installation.
+        run: |
+          /usr/bin/python3 --version
+          /usr/bin/python3 -c 'import sys; assert sys.version_info >= (3, 9); print(sys.executable)'
+          echo /usr/bin >> "$GITHUB_PATH"
+
       - name: Print runtime versions
         # Every release log records the exact macOS image, architecture, and
         # bash version the suite ran against. README "Compatibility" only
