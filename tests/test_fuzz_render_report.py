@@ -88,10 +88,19 @@ class FuzzTargetTests(unittest.TestCase):
                 fuzz.TestOneInput(b'{"results":[]}' + b" " * 17)
         render.assert_not_called()
 
-    def test_deeply_nested_json_is_an_expected_parse_rejection(self):
+    def test_deeply_nested_additive_metadata_does_not_crash(self):
         data = b'{"results":[],"metadata":' + b"[" * 2000 + b"0" + b"]" * 2000 + b"}"
-        with patch.object(report, "render") as render:
-            fuzz.TestOneInput(data)
+        # Parser depth limits vary across Python versions. The harness may
+        # reject this with RecursionError or render it with metadata ignored.
+        fuzz.TestOneInput(data)
+
+    def test_loader_recursion_error_is_an_expected_parse_rejection(self):
+        with patch.object(report, "read_document", side_effect=RecursionError("parser depth")) as load:
+            with patch.object(report, "validate") as validate:
+                with patch.object(report, "render") as render:
+                    fuzz.TestOneInput(VALID_BYTES)
+        load.assert_called_once()
+        validate.assert_not_called()
         render.assert_not_called()
 
     def test_schema_rejections_do_not_reach_renderer(self):
