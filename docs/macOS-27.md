@@ -10,7 +10,7 @@ of those controls is unverified.
 |---|---|
 | Operating system | `/usr/bin/sw_vers`: macOS 27.0.1, build 26A434 |
 | Architecture and shell | arm64, stock Bash 3.2.57 |
-| Complete local suite | 562 Bats tests, 67 Python tests, and 57 safety-checker fixtures passed on 2026-10-15. Bash syntax, ShellCheck, shfmt, the read-only tripwire, and diff whitespace checks passed. Workflow YAML also parsed successfully. |
+| Complete local suite | 570 Bats tests, 67 Python tests, and 57 safety-checker fixtures passed on 2026-10-15. Bash syntax, ShellCheck, shfmt, the read-only tripwire, and diff whitespace checks passed. Workflow YAML also parsed successfully. |
 | Host smoke test | A real read-only `--quick --json` run with a temporary home directory passed JSON structure, unique-ID, summary-count, TCC, and Background Security Improvements checks. |
 | Privileged checks | The automated results do not establish a full privileged audit or a complete inventory of managed-device permissions. |
 
