@@ -10,11 +10,13 @@ of those controls is unverified.
 |---|---|
 | Operating system | `/usr/bin/sw_vers`: macOS 27.0.1, build 26A434 |
 | Architecture and shell | arm64, stock Bash 3.2.57 |
-| Latest compatibility checks | 77 targeted Bats tests and 42 Python tests passed. Bash syntax, ShellCheck, shfmt, YAML, the read-only tripwire, and diff whitespace checks passed. |
+| Complete local suite | 542 Bats tests, 56 Python tests, and 57 safety-checker fixtures passed on 2026-10-15. Bash syntax, ShellCheck, shfmt, the read-only tripwire, and diff whitespace checks passed. Workflow YAML also parsed successfully. |
 | Host smoke test | A real read-only `--quick --json` run with a temporary home directory passed JSON structure, unique-ID, summary-count, TCC, and Background Security Improvements checks. |
 | Privileged checks | The automated results do not establish a full privileged audit or a complete inventory of managed-device permissions. |
 
-The original 507-test Bats suite ran on this host before the macOS 27 additions.
+The complete run used Python 3.9.6. The hosted suite also found and corrected a
+test assumption about JSON parser depth limits in Python 3.15; production code
+did not need a change for that difference.
 Use `./scripts/test.sh` for the complete test set in the current checkout. A
 successful smoke test checks execution and report structure; it does not prove
 that every reported setting matches a separately verified system state.

@@ -52,7 +52,7 @@ CI runs the same entry point on `macos-latest`. It covers section fixtures, real
 
 - Open an issue first for substantive changes — a new section, a schema addition, a profile override change, anything that touches the tripwire allowlists. For small fixes (a brittle regex, a missed redact branch, a stale comment) just open the PR.
 - Explain the threat model the check addresses. "This catches X. The current rows miss it because Y. Composite alternatives in §3 of docs/AGENTS.md don't cover this because Z." A check the audit doesn't have today is a fine PR; the script is intentionally conservative about adding noise.
-- Commits and tags are SSH-signed. Signing your own commits isn't required to contribute; it just looks nicer in the log.
+- Signed commits are welcome but are not required to contribute. Verify release signatures against the documented signer; do not assume every source commit is signed.
 - The project's MIT-licensed; by contributing you're agreeing to license your changes the same way.
 
 ## Out of scope
