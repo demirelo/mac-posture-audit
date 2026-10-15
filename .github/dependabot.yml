@@ -31,6 +31,12 @@ updates:
     open-pull-requests-limit: 5
   - package-ecosystem: "pip"
     directory: "/.clusterfuzzlite"
+    # The pinned OSS-Fuzz image runs Python 3.11. Atheris 3.1 publishes
+    # wheels only for Python 3.12+ and no source distribution. Revisit this
+    # bound when the build image moves to a supported Python version.
+    ignore:
+      - dependency-name: "atheris"
+        versions: [">=3.1.0"]
     schedule:
       interval: "weekly"
     commit-message:

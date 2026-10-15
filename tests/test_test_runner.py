@@ -34,12 +34,31 @@ class TestRunnerPreflight(unittest.TestCase):
         )
         path.chmod(0o700)
 
-    def run_preflight(self, *arguments):
-        env = dict(os.environ, PATH=str(self.directory), PROBE_LOG=str(self.trace))
+    def run_preflight(self, *arguments, jobs="1"):
+        env = dict(os.environ, PATH=str(self.directory), PROBE_LOG=str(self.trace),
+                   BATS_JOBS=jobs)
         result = subprocess.run(["/bin/bash", str(RUNNER), *arguments], env=env,
                                 capture_output=True, text=True, timeout=10)
         probes = self.trace.read_text().splitlines() if self.trace.exists() else []
         return result, probes
+
+    def test_parallel_jobs_require_a_working_parallel_tool(self):
+        result, probes = self.run_preflight("--check-tools", jobs="4")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Missing test tool: parallel", result.stderr)
+
+    def test_parallel_jobs_probe_parallel_before_tests(self):
+        self.write_tool("parallel")
+        result, probes = self.run_preflight("--check-tools", jobs="4")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(probes[-1], "parallel:--version")
+
+    def test_invalid_parallel_job_count_stops_before_tool_execution(self):
+        for jobs in ("0", "9", "-1", "4;echo bad", "many"):
+            with self.subTest(jobs=jobs):
+                result, probes = self.run_preflight("--check-tools", jobs=jobs)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(probes, [])
 
     def test_check_tools_only_probes_dependencies(self):
         result, probes = self.run_preflight("--check-tools")

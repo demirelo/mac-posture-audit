@@ -22,3 +22,9 @@ posture-*.txt
 .gstack/
 __pycache__/
 *.pyc
+
+# Local audit output and coverage files; never publish host reports.
+posture.json
+report.html
+report.md
+*.profraw

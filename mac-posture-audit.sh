@@ -30,7 +30,7 @@
 # shellcheck disable=SC2088
 set -uo pipefail
 
-SCRIPT_VERSION="1.7.0-dev"
+SCRIPT_VERSION="1.7.0"
 
 # ── State ───────────────────────────────────────────────────────────────────
 # Every array below uses plain `X=()` assignment rather than `declare -a X`:
