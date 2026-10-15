@@ -2,12 +2,21 @@ name: Safety
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: safety-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 # Default token to read-only. The job below re-asserts contents:read for clarity
 # and so adding any future job inherits a least-privilege default.
 permissions:
   contents: read
+
+env:
+  BATS_JOBS: 4
+  HOMEBREW_NO_ANALYTICS: 1
 
 defaults:
   run:
@@ -28,7 +37,15 @@ jobs:
           persist-credentials: false
 
       - name: Install test tools
-        run: brew install bats-core shellcheck shfmt
+        run: brew install bats-core shellcheck shfmt parallel
+
+      - name: Use Apple command-line Python
+        # Use the interpreter shipped with the runner's Xcode/Command Line Tools.
+        # Do not replace it with a Homebrew or setup-python installation.
+        run: |
+          /usr/bin/python3 --version
+          /usr/bin/python3 -c 'import sys; assert sys.version_info >= (3, 9); print(sys.executable)'
+          echo /usr/bin >> "$GITHUB_PATH"
 
       - name: Print runtime versions
         # Every release log records the exact macOS image, architecture, and

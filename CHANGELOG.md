@@ -2,11 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.7.0] - 2026-10-15
 
-Security and reliability changes for the next release. These changes are not yet published.
+Security, privacy, and reliability release with macOS 27 support.
 
 ### Security fixes
+
+- Allow only the public fuzzing source and synthetic seed files into Docker build contexts. Keep local audit output and coverage files out of commits.
 
 - Prevent package-manager, Homebrew, and Gitleaks execution during configuration checks. Read user settings and inventory as data. Reject whole-script root execution and prioritize system tools.
 - Create snapshots with private permissions and exclusive filenames. Reject unsafe directories, user symlinks, and access-granting ACLs. Report write errors as exit `2`.
@@ -18,6 +20,11 @@ Security and reliability changes for the next release. These changes are not yet
 - Test release source with read-only permissions before publishing. Bind publication and provenance to the tested tag commit. Refuse replacement of existing assets.
 
 ### Reliability and report changes
+
+- Do not treat webhook provider names in documentation as configured destinations. Keep detection of scheme-less webhook UUIDs and RequestBin endpoint variants.
+- Exclude MCP executable paths from the filesystem-grant heuristic while retaining storage arguments and canonical filesystem servers.
+- Qualify wildcard-listener reachability and wallet-browser separation as unverified. Give the shared `sk-` credential shape a provider-neutral label.
+- Run CI Bats tests with four workers. Local runs remain serial unless `BATS_JOBS` is set; parallel runs require GNU parallel.
 
 - Use bounded structural JSON parsing and linear comparisons for diff and trend. Invalid data exits `2`. Added, removed, and unverified checks remain visible.
 - Include remediation in Markdown and HTML. Do not claim a clean report when `--top 0` hides findings. Validate `--top` in the range 0–1000.

@@ -34,7 +34,16 @@ tool_error() {
   printf 'Check the tools without running tests: ./scripts/test.sh --check-tools\n' >&2
 }
 
-for tool in bats shellcheck shfmt python3; do
+test_jobs="${BATS_JOBS:-1}"
+if [[ ! "$test_jobs" =~ ^[1-8]$ ]]; then
+  printf 'BATS_JOBS must be an integer from 1 to 8.\n' >&2
+  exit 2
+fi
+test_tools=(bats shellcheck shfmt python3)
+if [[ "$test_jobs" -gt 1 ]]; then
+  test_tools+=(parallel)
+fi
+for tool in "${test_tools[@]}"; do
   if ! tool_path=$(command -v "$tool"); then
     printf 'Missing test tool: %s. Install it or add its directory to PATH.\n' "$tool" >&2
     exit 2
@@ -96,6 +105,6 @@ printf "Safety fixtures passed: %s accepted, %s rejected\n" "$accepted" "$reject
 # and installed applications are still visible; this is not a hermetic suite.
 test_home=$(mktemp -d "${TMPDIR:-/tmp}/mac-posture-tests.XXXXXX")
 trap 'rm -rf -- "$test_home"' EXIT
-HOME="$test_home" bats tests/sections tests/integration
+HOME="$test_home" bats --jobs "$test_jobs" tests/sections tests/integration
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 -m unittest discover -s tests/check-read-only -p 'test_*.py'
