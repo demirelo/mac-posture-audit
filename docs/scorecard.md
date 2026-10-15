@@ -64,6 +64,10 @@ token for affected-target selection.
 
 ## Best Practices badge evidence
 
+The [criterion-by-criterion assessment](best-practices.md) and
+[import proposal](../.bestpractices.json) prepare evidence for enrollment. Unknown
+mandatory answers remain unknown; no badge or new score is claimed by these files.
+
 The repository has a license, contribution guide, private security reporting,
 release history, automated tests, static analysis, fuzzing configuration,
 dependency maintenance, pinned CI dependencies, and signed release assets.

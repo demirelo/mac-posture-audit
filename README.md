@@ -313,6 +313,12 @@ v1.x is the public-release line. Possible directions:
 
 ## Contributing
 
+Report bugs and propose enhancements through [GitHub issues](https://github.com/demirelo/mac-posture-audit/issues).
+Use [private reporting](SECURITY.md#reporting-a-vulnerability) for security issues.
+Independent human review and synthetic macOS compatibility fixtures are welcome.
+The [Best Practices assessment](docs/best-practices.md) records supported answers
+and open evidence gaps; it does not claim an earned badge.
+
 Pull requests welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the four invariants: read-only probes, bash 3.2 compatibility, stable IDs, and hermetic tests via `*_ROOTS` overrides.
 
 For faster local validation, install GNU parallel and run

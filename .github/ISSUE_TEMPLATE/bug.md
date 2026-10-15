@@ -12,9 +12,10 @@ assignees: ''
 
 ## What I expected vs. what I saw
 
-<!-- Two short lists. For false positives / negatives, paste the relevant
-     row from the JSON output. Use `--redact` if it contains anything
-     identifying. -->
+<!-- State the check ID and expected/observed status. Use synthetic values.
+     Do not paste a host report or raw JSON row, even with --redact: findings
+     can still reveal installed tools, private paths and security settings.
+     For suspected vulnerabilities, use SECURITY.md instead of this issue. -->
 
 ## Reproduction
 
@@ -28,7 +29,7 @@ assignees: ''
 ```bash
 # The exact command I ran:
 
-# The output I got (redacted):
+# Minimal synthetic output that reproduces the issue:
 
 ```
 
