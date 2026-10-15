@@ -9,22 +9,22 @@
 # packaging/homebrew/README.md in this repo for the exact one-time steps to
 # create that tap and copy this formula into it.
 #
-# It pins the existing signed, SLSA-attested v1.6.0 release tarball by SHA-256.
+# It pins the existing signed, SLSA-attested v1.7.0 release tarball by SHA-256.
 # The checksum below is the content of the release's published
-# `mac-posture-audit-v1.6.0.tar.gz.sha256` asset. When a new version is
+# `mac-posture-audit-v1.7.0.tar.gz.sha256` asset. When a new version is
 # released, bump `url`, `version`, and `sha256` together (the new checksum is
 # always attached to the release as `*.tar.gz.sha256`).
 class MacPostureAudit < Formula
-  desc "Read-only macOS security-posture auditor (single-file bash, 183 checks)"
+  desc "Read-only macOS security-posture auditor (single-file bash)"
   homepage "https://github.com/demirelo/mac-posture-audit"
-  url "https://github.com/demirelo/mac-posture-audit/releases/download/v1.6.0/mac-posture-audit-v1.6.0.tar.gz"
-  version "1.6.0"
-  sha256 "d3580a9457bcaaf246d28d40c81c7a76a609d7b7639fe2c620ba69ccf9569c64"
+  url "https://github.com/demirelo/mac-posture-audit/releases/download/v1.7.0/mac-posture-audit-v1.7.0.tar.gz"
+  version "1.7.0"
+  sha256 "9dd7fc65610c8348ccc4992abe46cc78f2a377eb2ff2431ac2dc5d2fc22ad796"
   license "MIT"
 
   # No runtime dependencies. The auditor is bash 3.2-compatible and uses only
   # tools that ship with macOS. The optional HTML renderer
-  # (tools/render_report.py) relies solely on the stdlib python3 from the Xcode
+  # (tools/render_report.py) relies solely on the Apple /usr/bin/python3 from the Xcode
   # Command Line Tools, so it is not declared as a formula dependency either.
 
   def install
