@@ -2,15 +2,19 @@
 
 ## Baseline and current limits
 
-The public report retrieved on 2026-10-15 scored **8.2/10**. It was generated on
-2026-08-25 for commit `96f423d5e0211af963f6de44a42d19c8fda1738d`, using Scorecard
-5.5.0. It does not assess the pending hardening changes.
+The public report generated on 2026-10-15 at 18:36 UTC scored **8.0/10** for
+commit `b8cb1d66f07ce127d1a644df69408f9342d39a23`. The previous published report
+scored **8.2/10** for `96f423d5e0211af963f6de44a42d19c8fda1738d` on 2026-08-25.
 
-The latest scheduled scan failed with HTTP 401 from the saved `SCORECARD_TOKEN`.
-The workflow now uses its short-lived GitHub token. Its analysis job has explicit
-read access to contents, with write access only for SARIF and OIDC publication.
-Public branch rules expose protection settings without a long-lived admin token.
-A successful default-branch scan is still required to refresh the public report.
+The latest report gives Maintained 7: nine commits and no issue activity in its
+90-day window. The earlier baseline recorded 10 for this check. The core
+supply-chain controls remain at 10: pinned dependencies, least-privilege tokens,
+fuzzing, signed releases, binary artifacts, vulnerability checks and CI tests.
+A rolling activity window can lower the aggregate without a control being removed.
+
+The stale-token scan failure has been repaired. Publication now uses the
+short-lived GitHub token. Only public repository metadata and source-analysis
+results are published; host audits and private configuration are not inputs.
 
 | Check | Published score | Next useful action |
 | --- | --- | --- |
@@ -18,6 +22,7 @@ A successful default-branch scan is still required to refresh the public report.
 | Branch Protection | 4 | Recruit a second maintainer before requiring approvals. Existing protections remain active, with review-thread resolution added. |
 | CII Best Practices | 0 | Complete the OpenSSF Best Practices questionnaire with evidence and honest answers. No badge is claimed. |
 | Contributors | 0 | Attract real independent contributors. Do not create artificial contributors or affiliations. |
+| Maintained | 7 | Merge useful, tested changes and maintain the project. Do not create empty commits or artificial issue activity. |
 | SAST | 9 | Keep CodeQL scans successful on PR heads; historical coverage improves only as new reviewed changes accumulate. |
 | Packaging | -1 | This check is unscored. Retain the signed tarball distribution; an unrelated package publication is not needed. |
 

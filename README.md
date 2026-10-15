@@ -10,18 +10,36 @@ A read-only, single-file shell script that audits a macOS machine's security pos
 ## Install
 
 ```bash
-# Homebrew (coming — see packaging/homebrew):
-brew install demirelo/tap/mac-posture-audit
-
-# Or just clone — it's one file (recommended: read it first, see below):
 git clone https://github.com/demirelo/mac-posture-audit
+cd mac-posture-audit
 ```
 
-> The `brew` one-liner installs the signed, SHA-256-pinned release tarball. The
-> tap (`demirelo/homebrew-tap`) is not published yet — the ready-to-use formula
-> and the one-time publish steps live in
-> [`packaging/homebrew/`](packaging/homebrew/). Until the tap is live, use the
-> `git clone` path below.
+Use the [latest signed release](https://github.com/demirelo/mac-posture-audit/releases/latest)
+for a versioned download. Releases include a SHA-256 checksum, a Sigstore bundle,
+and build provenance. The Homebrew tap is not published; its draft formula is
+in [`packaging/homebrew/`](packaging/homebrew/).
+
+## Privacy and report handling
+
+The default audit is offline. It reads local settings and prints results; it has
+no telemetry, report upload, or remote analysis service. Use `--offline` to state
+that choice explicitly. `--network` permits the two documented external probes;
+it is not required for the local checks.
+
+`--redact` reduces identifying details, but a report still describes security
+settings and installed software. Review it before sharing. Keep host reports,
+snapshots, screenshots, credentials, and private configuration out of commits,
+issues, CI artifacts, and external AI prompts. The HTML renderer works locally
+and loads no external assets.
+
+```bash
+umask 077
+./mac-posture-audit.sh --offline --json --redact --profile normal > posture.json
+python3 tools/render_report.py posture.json --output report.html
+```
+
+The renderer refuses an existing output path. Use a new filename for each run.
+No real host report is needed for CI; tests and fuzzing use synthetic inputs.
 
 ## Inspect before running
 
@@ -56,7 +74,7 @@ rows in a run depends on the OS and installed software. Checks by theme:
 - **Crypto & 2FA** — hardware wallets (Ledger / Trezor / Keystone / GridPlus), password managers, YubiKey / FIDO2, and a wallet-isolation composite.
 - **Backups & cloud** — Time Machine destinations / recency / encryption, third-party backup tools, iCloud sync, and sensitive data (`.ssh` / `.aws` / wallets) leaking into cloud-sync roots.
 - **Persistence & access** — LaunchAgents/Daemons (incl. webhook/exfil-shaped destinations), login items, crontab, TCC permission holders, remote-access apps, sandboxes, MDM enrollment, clipboard managers.
-- **Agents & MCP** — MCP servers (Cursor / Claude / Windsurf / Gemini): server count, `@latest`/`:latest` unpinned launchers, remote HTTP/SSE transports, dynamic launchers (npx/uvx/bunx/pipx/docker), filesystem-capable servers, and webhook/exfil destinations. MCP env values and key names are never read.
+- **Agents & MCP** — MCP servers (Cursor / Claude / Windsurf / Gemini): server count, `@latest`/`:latest` unpinned launchers, remote HTTP/SSE transports, dynamic launchers (npx/uvx/bunx/pipx/docker), filesystem-capable servers, and webhook/exfil destinations. MCP credential values and key names are omitted from reports.
 - **AI agent instruction hygiene** — discovers the files that steer coding agents (`AGENTS.md` / `CLAUDE.md` / `GEMINI.md` / `.cursorrules` / `.cursor` rules, etc.) under your project roots and flags hidden/zero-width Unicode, suspicious directive-shaped phrases (prompt-injection / pipe-to-shell), and webhook destinations. Two-tier discovery with strict bounds (depth 3, ≤256 KB/file, ≤200 files, junk dirs pruned); matched lines, URLs, and tokens are never printed.
 - **Webhook / exfil shapes** — one-line exfil endpoints (Discord/Slack/Telegram/webhook.site/RequestBin/Pipedream/IFTTT/Zapier) detected across config surfaces that run automatically — shell rc, LaunchAgents, MCP configs, agent instruction files, `~/.npmrc` / `~/.pypirc` — aggregated into `config.webhook_exfil_shape`. Provider name only; never the URL or token.
 - **Inventory (catalog-driven)** — browser extensions, editor extensions (VS Code / Cursor / Windsurf / VSCodium), and MCP server IDs, each matchable against an exposure catalog of known-bad IDs.
@@ -71,7 +89,7 @@ Every run ends with an **Executive Verdict** — a profile-aware one-line read p
 ```bash
 ./mac-posture-audit.sh                                        # default: offline, read-only
 ./mac-posture-audit.sh --network                              # opt-in live checks (NextDNS routing, gh auth)
-./mac-posture-audit.sh --json --quick --redact > posture.json # shareable machine-readable report
+./mac-posture-audit.sh --json --quick --redact > posture.json # redacted local report; review before sharing
 ```
 
 Run the audit as your normal user. Whole-script root execution is rejected. Without `--quick`, individual checks use `sudo -n` if access is already available; the audit does not ask for a password. A failed privileged read is unverified, not a pass. The default run is offline; `--network` permits the two documented network probes.
@@ -286,13 +304,17 @@ v1.x is the public-release line. Possible directions:
 
 - **Evidence fields** in JSON rows so consumers get structured detail without scraping labels. *(Started in v1.7.0 — an optional, redaction-safe `evidence` object on a representative subset of checks; see [docs/schema.md → Evidence](docs/schema.md#evidence-added-v170). More checks to follow.)*
 - **`--deep` mode** — slower, opt-in scan across project directories with explicit excludes and redaction-safe output.
-- **Signed release artifacts** with published checksums.
 - **Continuous snapshot mode** that stores JSON locally and alerts on newly-introduced failures.
 - **Per-brand killswitch verification** for ProtonVPN / NordVPN (currently advisory) and broader messaging-app coverage (Signal, Discord, WhatsApp).
 
 ## Contributing
 
 Pull requests welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the four invariants: read-only probes, bash 3.2 compatibility, stable IDs, and hermetic tests via `*_ROOTS` overrides.
+
+For faster local validation, install GNU parallel and run
+`BATS_JOBS=4 ./scripts/test.sh`. The default is one worker. CI uses four workers
+and cancels superseded runs for the same branch; every PR and main push still
+receives validation.
 
 ## License
 

@@ -19,6 +19,10 @@ concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
+env:
+  BATS_JOBS: 4
+  HOMEBREW_NO_ANALYTICS: 1
+
 defaults:
   run:
     shell: bash
@@ -76,7 +80,7 @@ jobs:
           printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
 
       - name: Install test tools
-        run: brew install bats-core shellcheck shfmt
+        run: brew install bats-core shellcheck shfmt parallel
 
       - name: Validate before release
         run: ./scripts/test.sh

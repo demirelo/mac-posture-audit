@@ -2,12 +2,21 @@ name: Safety
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: safety-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 # Default token to read-only. The job below re-asserts contents:read for clarity
 # and so adding any future job inherits a least-privilege default.
 permissions:
   contents: read
+
+env:
+  BATS_JOBS: 4
+  HOMEBREW_NO_ANALYTICS: 1
 
 defaults:
   run:
@@ -28,7 +37,7 @@ jobs:
           persist-credentials: false
 
       - name: Install test tools
-        run: brew install bats-core shellcheck shfmt
+        run: brew install bats-core shellcheck shfmt parallel
 
       - name: Print runtime versions
         # Every release log records the exact macOS image, architecture, and
