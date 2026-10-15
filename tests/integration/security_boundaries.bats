@@ -32,6 +32,42 @@ PY
   [[ "$output" == *'\nPASS'* ]]
 }
 
+@test "redacted findings mask HOME in stored rows and ranked risks" {
+  REDACT=true
+  warn "Check $HOME/private.txt" "Review $HOME/private.txt and $HOME/config" test.output
+  [ "${ROW_LABEL[0]}" = 'Check ~/private.txt' ]
+  [ "${ROW_HINT[0]}" = 'Review ~/private.txt and ~/config' ]
+  [ "${RANK_LABEL[0]}" = 'Check ~/private.txt' ]
+  [ "${RANK_HINT[0]}" = 'Review ~/private.txt and ~/config' ]
+  [[ "${RESULTS_WARN[0]}" != *"$HOME"* ]]
+  [[ "${JSON_ROWS[0]}" != *"$HOME"* ]]
+}
+
+@test "redacted findings mask HOME in JSON and Markdown reports" {
+  REDACT=true
+  warn "Check $HOME/private.txt" "Review $HOME/config" test.output
+  run _build_json_document
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"$HOME"* ]]
+  [[ "$output" == *'~/private.txt'* ]]
+  [[ "$output" == *'~/config'* ]]
+  run emit_markdown_report
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"$HOME"* ]]
+  [[ "$output" == *'~/private.txt'* ]]
+  [[ "$output" == *'~/config'* ]]
+}
+
+@test "redacted terminal findings mask HOME in labels and hints" {
+  MODE=full
+  REDACT=true
+  run warn "Check $HOME/private.txt" "Review $HOME/config" test.output
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"$HOME"* ]]
+  [[ "$output" == *'~/private.txt'* ]]
+  [[ "$output" == *'~/config'* ]]
+}
+
 @test "Markdown treats host and findings as text and includes remediation" {
   warn '<img src="https://tracker.invalid/pixel"> [click](https://evil.invalid)' 'Review this setting' test.output
   run emit_markdown_report
@@ -59,6 +95,49 @@ PY
   [ "${#files[@]}" -eq 2 ]
   [ "$(stat -f '%Lp' "$MSA_HISTORY_DIR")" = 700 ]
   [ "$(stat -f '%Lp' "${files[0]}")" = 600 ]
+}
+
+@test "snapshots mask HOME in finding labels and hints" {
+  SNAPSHOT=true
+  REDACT=true
+  export MSA_HISTORY_DIR="$BATS_TEST_TMPDIR/history"
+  warn "Check $HOME/private.txt" "Review $HOME/config" test.output
+  maybe_write_snapshot
+  local files=("$MSA_HISTORY_DIR"/posture-*.json)
+  [ "${#files[@]}" -eq 1 ]
+  run cat "${files[0]}"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"$HOME"* ]]
+  [[ "$output" == *'~/private.txt'* ]]
+  [[ "$output" == *'~/config'* ]]
+}
+
+@test "snapshots ignore CDPATH and leave stdout empty" {
+  SNAPSHOT=true
+  REDACT=true
+  export MSA_HISTORY_DIR="$BATS_TEST_TMPDIR/history"
+  local redirect="$BATS_TEST_TMPDIR/redirect"
+  # Mirror the requested path below CDPATH. All directories are private, so
+  # the ownership and mode checks alone would allow the redirected write.
+  (umask 077; mkdir -p "$MSA_HISTORY_DIR" "$redirect$MSA_HISTORY_DIR")
+  export CDPATH="$redirect"
+  pass 'Safe' test.output
+  maybe_write_snapshot >"$BATS_TEST_TMPDIR/stdout"
+  [ ! -s "$BATS_TEST_TMPDIR/stdout" ]
+  local files=("$MSA_HISTORY_DIR"/posture-*.json)
+  [ "${#files[@]}" -eq 1 ]
+  [ -f "${files[0]}" ]
+  [ -z "$(ls -A "$redirect$MSA_HISTORY_DIR")" ]
+}
+
+@test "main clears imported CDPATH before argument handling" {
+  run env CDPATH="$BATS_TEST_TMPDIR/redirect" /bin/bash -p -c '
+    source "$1"
+    parse_args() { [[ -z "${CDPATH:-}" ]] || exit 99; exit 0; }
+    main --help
+  ' _ "$REPO_ROOT/mac-posture-audit.sh"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }
 
 @test "snapshots reject a symlink directory without writing through it" {

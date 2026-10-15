@@ -902,8 +902,9 @@ _record() {
   # Stable across runs so external consumers can diff successive scans by id.
   local status="$1" label="$2" hint="${3:-}" id="${4:-}"
   if [[ "${REDACT:-false}" == true && -n "${HOME:-}" ]]; then
-    label=${label//"$HOME"/~}
-    hint=${hint//"$HOME"/~}
+    # Keep the replacement tilde literal, including on stock Bash 3.2.
+    label="${label//"$HOME"/~}"
+    hint="${hint//"$HOME"/~}"
   fi
   if [[ "$MODE" != "json" ]]; then
     label=$(_terminal_text "$label")
@@ -4394,15 +4395,25 @@ _check_sudo_nopasswd() {
     return
   fi
   local output rc=0
-  output=$(sudo -n grep -rh "NOPASSWD" /etc/sudoers /etc/sudoers.d/ 2>/dev/null) || rc=$?
+  # awk succeeds after a complete read even when it finds no matches. grep's
+  # no-match status overlaps sudo's authorization-failure status, so it cannot
+  # distinguish a clean policy from a failed read. Read regular files only:
+  # BSD find -L can silently ignore broken links and directory loops. Print
+  # unexpected input types and symlinks so they leave the policy unverified.
+  # The fixed awk program emits only a finding marker. An empty successful
+  # result is the only safe result; captured diagnostics also prevent a pass.
+  output=$(sudo -n /usr/bin/find -P /etc/sudoers /etc/sudoers.d \
+    \( -path /etc/sudoers ! -type f -o -path /etc/sudoers.d ! -type d \) -print \
+    -o -type f -exec /usr/bin/awk '!/^[[:space:]]*#/ && /NOPASSWD/ { print "AUDIT_NOPASSWD" }' {} + \
+    -o ! -type d -print 2>&1) || rc=$?
   # A match from a partial read is still evidence of an unsafe entry. A failed
   # read with no match is not evidence that the policy is safe.
-  if printf '%s\n' "$output" | grep -vE '^[[:space:]]*#' | grep -q 'NOPASSWD'; then
+  if [[ $'\n'"$output"$'\n' == *$'\nAUDIT_NOPASSWD\n'* ]]; then
     fail "Found NOPASSWD entries in sudoers" "Review the sudoers policy and its included files." "user.sudo.nopasswd"
-  elif [[ "$rc" -eq 0 ]]; then
+  elif [[ "$rc" -eq 0 && -z "$output" ]]; then
     pass "No active NOPASSWD entries found in the inspected sudoers files" "user.sudo.nopasswd"
   else
-    skip "Sudoers policy could not be fully verified" "A privileged read failed or returned no data. Review sudoers and included files manually." "user.sudo.nopasswd"
+    skip "Sudoers policy could not be fully verified" "A privileged read failed or a policy input was a symlink or unexpected file type. Review sudoers and included files manually." "user.sudo.nopasswd"
   fi
 }
 
@@ -6307,18 +6318,56 @@ _diff_parse_rows() {
       printf "--diff: %s %s\n", source, message > "/dev/stderr"
       exit 2
     }
+    # BWK awk scans a string when taking a substring. Keep cursor reads on
+    # bounded chunks, including when the input is one very long JSON line.
+    # Balanced splitting costs O(n log n), rather than repeatedly slicing an
+    # entire remaining line. No decoded document-sized string is constructed.
+    function add_chunks(text, size,    middle,room) {
+      if (size <= 1024) {
+        room = 1024 - length(pending)
+        if (size < room) pending = pending text
+        else {
+          chunks[++chunk_count] = pending substr(text, 1, room)
+          pending = substr(text, room + 1)
+        }
+        return
+      }
+      middle = int(size / 2)
+      add_chunks(substr(text, 1, middle), middle)
+      add_chunks(substr(text, middle + 1), size - middle)
+    }
+    function peek() {
+      while (pos > chunk_size && chunk_index <= chunk_count) {
+        delete chunks[chunk_index]
+        chunk = chunks[++chunk_index]
+        chunk_size = length(chunk)
+        pos = 1
+      }
+      return substr(chunk, pos, 1)
+    }
+    function take(    ch) {
+      ch = peek()
+      pos++
+      return ch
+    }
     function ws() {
-      while (substr(doc, pos, 1) ~ /^[ \t\r\n]$/) pos++
+      while (peek() ~ /^[ \t\r\n]$/) {
+        match(substr(chunk, pos), /^[ \t\r\n]+/)
+        pos += RLENGTH
+      }
+    }
+    function count_value() {
+      if (++values > 250000) bad("exceeds the 250000-value limit")
     }
     function hex4(    h,i,n,c) {
-      h = substr(doc, pos, 4)
+      h = ""
+      for (i = 1; i <= 4; i++) h = h take()
       if (length(h) != 4 || h ~ /[^0-9a-fA-F]/) bad("contains an invalid Unicode escape")
       n = 0
       for (i = 1; i <= 4; i++) {
         c = index("0123456789abcdef", tolower(substr(h, i, 1))) - 1
         n = n * 16 + c
       }
-      pos += 4
       return n
     }
     function utf8(n) {
@@ -6327,12 +6376,44 @@ _diff_parse_rows() {
       if (n < 65536) return sprintf("%c%c%c", 224 + int(n / 4096), 128 + int(n / 64) % 64, 128 + n % 64)
       return sprintf("%c%c%c%c", 240 + int(n / 262144), 128 + int(n / 4096) % 64, 128 + int(n / 64) % 64, 128 + n % 64)
     }
-    function string_value(    out,c,e,n,lo,bytes,point,minimum,b,raw) {
-      if (substr(doc, pos++, 1) != "\"") bad("contains an invalid object key or string")
+    function string_value(capture,    out,c,e,n,lo,bytes,point,minimum,b,raw,parts,pieces,step,i) {
+      if (take() != "\"") bad("contains an invalid object key or string")
       out = ""
-      while (pos <= length(doc)) {
-        c = substr(doc, pos++, 1)
-        if (c == "\"") return out
+      while ((c = peek()) != "") {
+        # Copy runs of ASCII and valid UTF-8. The byte ranges exclude
+        # overlong encodings, surrogate code points, and values > U+10FFFF.
+        # A sequence split across chunks uses the byte validator below.
+        if (match(substr(chunk, pos), /^([^"\\[:cntrl:]\200-\377]|\177|[\302-\337][\200-\277]|\340[\240-\277][\200-\277]|[\341-\354\356-\357][\200-\277][\200-\277]|\355[\200-\237][\200-\277]|\360[\220-\277][\200-\277][\200-\277]|[\361-\363][\200-\277][\200-\277][\200-\277]|\364[\200-\217][\200-\277][\200-\277])+/)) {
+          if (capture) out = out substr(chunk, pos, RLENGTH)
+          pos += RLENGTH
+          if (capture && length(out) >= 1024) { pieces[++parts] = out; out = "" }
+          continue
+        }
+        # Decode common escapes in bounded runs. Ignored metadata strings
+        # still get strict validation without building a decoded copy.
+        if (match(substr(chunk, pos), /^(\\["\\\/bfnrt])+/)) {
+          if (capture) {
+            raw = substr(chunk, pos, RLENGTH)
+            bytes = length(raw)
+            for (lo = 2; lo <= bytes; lo += 2) out = out escapes[substr(raw, lo, 1)]
+            if (length(out) >= 1024) { pieces[++parts] = out; out = "" }
+          }
+          pos += RLENGTH
+          continue
+        }
+        pos++
+        if (c == "\"") {
+          if (!capture) return ""
+          pieces[++parts] = out
+          # Keys and IDs can be long too. Join decoded fragments in a
+          # balanced tree instead of copying an ever-growing string.
+          for (step = 1; step < parts; step *= 2)
+            for (i = 1; i + step <= parts; i += step * 2) {
+              pieces[i] = pieces[i] pieces[i + step]
+              delete pieces[i + step]
+            }
+          return pieces[1]
+        }
         n = octets[c]
         if (n == 0) bad("contains a NUL byte")
         if (n < 32) bad("contains an unescaped control character")
@@ -6343,64 +6424,71 @@ _diff_parse_rows() {
           else if (n >= 240 && n <= 244) { bytes = 3; point = n - 240; minimum = 65536 }
           else bad("contains invalid UTF-8")
           for (lo = 0; lo < bytes; lo++) {
-            c = substr(doc, pos++, 1)
+            c = take()
             b = octets[c]
             if (b < 128 || b > 191) bad("contains invalid UTF-8")
             point = point * 64 + b - 128
             raw = raw c
           }
           if (point < minimum || point > 1114111 || (point >= 55296 && point <= 57343)) bad("contains invalid UTF-8")
-          out = out raw
+          if (capture) out = out raw
+          if (capture && length(out) >= 1024) { pieces[++parts] = out; out = "" }
           continue
         }
-        if (c != "\\") { out = out c; continue }
-        e = substr(doc, pos++, 1)
-        if (e == "\"" || e == "\\" || e == "/") out = out e
-        else if (e == "b") out = out sprintf("%c", 8)
-        else if (e == "f") out = out sprintf("%c", 12)
-        else if (e == "n") out = out "\n"
-        else if (e == "r") out = out "\r"
-        else if (e == "t") out = out "\t"
+        if (c != "\\") {
+          if (capture) out = out c
+          if (capture && length(out) >= 1024) { pieces[++parts] = out; out = "" }
+          continue
+        }
+        e = take()
+        if (e == "\"" || e == "\\" || e == "/") raw = e
+        else if (e == "b") raw = sprintf("%c", 8)
+        else if (e == "f") raw = sprintf("%c", 12)
+        else if (e == "n") raw = "\n"
+        else if (e == "r") raw = "\r"
+        else if (e == "t") raw = "\t"
         else if (e == "u") {
           n = hex4()
           # Stock macOS awk cannot preserve NUL in sprintf. Bash reports
           # cannot contain it either; reject instead of changing the value.
           if (n == 0) bad("contains a NUL escape")
           if (n >= 55296 && n <= 56319) {
-            if (substr(doc, pos, 2) != "\\u") bad("contains an unpaired Unicode surrogate")
-            pos += 2
+            if (take() != "\\" || take() != "u") bad("contains an unpaired Unicode surrogate")
             lo = hex4()
             if (lo < 56320 || lo > 57343) bad("contains an unpaired Unicode surrogate")
             n = 65536 + (n - 55296) * 1024 + lo - 56320
           } else if (n >= 56320 && n <= 57343) bad("contains an unpaired Unicode surrogate")
-          out = out utf8(n)
+          raw = utf8(n)
         } else bad("contains an invalid string escape")
+        if (capture) out = out raw
+        if (capture && length(out) >= 1024) { pieces[++parts] = out; out = "" }
       }
       bad("contains an unterminated string")
     }
     function object_value(depth, mode,    object,key,ch,id,status,idtype,statustype) {
+      if (mode != "other") count_value()
       object = ++objects
       pos++
       ws()
-      if (substr(doc, pos, 1) != "}") {
+      if (peek() != "}") {
         while (1) {
-          key = string_value()
+          key = string_value(1)
           if ((object SUBSEP key) in keys) bad("contains a duplicate object member")
           keys[object, key] = 1
           ws()
-          if (substr(doc, pos++, 1) != ":") bad("contains a missing colon")
+          if (take() != ":") bad("contains a missing colon")
           ws()
           if (mode == "root" && key == "results") {
             found_results = 1
-            if (substr(doc, pos, 1) != "[") bad("JSON must contain a results array")
+            if (peek() != "[") bad("JSON must contain a results array")
             array_value(depth + 1, "results")
           } else {
-            value(depth + 1)
+            value(depth + 1, mode == "row" && (key == "id" || key == "status"))
             if (mode == "row" && key == "id") { id = scalar; idtype = kind }
             if (mode == "row" && key == "status") { status = scalar; statustype = kind }
           }
           ws()
-          ch = substr(doc, pos++, 1)
+          ch = take()
           if (ch == "}") break
           if (ch != ",") bad("contains an invalid object separator")
           ws()
@@ -6421,52 +6509,86 @@ _diff_parse_rows() {
     }
     function array_value(depth, mode,    ch) {
       if (depth > 64) bad("exceeds the 64-level nesting limit")
+      if (mode == "results") count_value()
       pos++
       ws()
-      if (substr(doc, pos, 1) == "]") { pos++; kind = "array"; return }
+      if (peek() == "]") { pos++; kind = "array"; return }
       while (1) {
         if (mode == "results") {
-          if (substr(doc, pos, 1) != "{") bad("results entries must be objects")
+          if (peek() != "{") bad("results entries must be objects")
           object_value(depth + 1, "row")
         } else value(depth + 1)
         ws()
-        ch = substr(doc, pos++, 1)
+        ch = take()
         if (ch == "]") break
         if (ch != ",") bad("contains an invalid array separator")
         ws()
       }
       kind = "array"
     }
-    function value(depth,    ch,tail) {
+    function digits(    count) {
+      count = 0
+      while (peek() ~ /^[0-9]$/) {
+        match(substr(chunk, pos), /^[0-9]+/)
+        pos += RLENGTH
+        count += RLENGTH
+      }
+      return count
+    }
+    function value(depth, capture,    ch,literal,i) {
       if (depth > 64) bad("exceeds the 64-level nesting limit")
+      count_value()
       ws()
-      ch = substr(doc, pos, 1)
+      ch = peek()
       scalar = ""
       if (ch == "{") object_value(depth, "other")
       else if (ch == "[") array_value(depth, "other")
-      else if (ch == "\"") { scalar = string_value(); kind = "string" }
+      else if (ch == "\"") { scalar = string_value(capture); kind = "string" }
       else {
-        tail = substr(doc, pos)
-        if (match(tail, /^(true|false|null)/)) { pos += RLENGTH; kind = "literal" }
-        else if (match(tail, /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/)) { pos += RLENGTH; kind = "number" }
-        else bad("contains an invalid JSON value")
+        if (ch == "t" || ch == "f" || ch == "n") {
+          literal = (ch == "t" ? "true" : (ch == "f" ? "false" : "null"))
+          for (i = 1; i <= length(literal); i++)
+            if (take() != substr(literal, i, 1)) bad("contains an invalid JSON value")
+          kind = "literal"
+        } else {
+          if (ch == "-") { pos++; ch = peek() }
+          if (ch == "0") pos++
+          else if (ch ~ /^[1-9]$/) digits()
+          else bad("contains an invalid JSON value")
+          if (peek() == ".") { pos++; if (!digits()) bad("contains an invalid JSON number") }
+          if (peek() ~ /^[eE]$/) {
+            pos++
+            if (peek() ~ /^[+-]$/) pos++
+            if (!digits()) bad("contains an invalid JSON number")
+          }
+          kind = "number"
+        }
       }
     }
     BEGIN {
       for (i = 1; i < 256; i++) octets[sprintf("%c", i)] = i
+      escapes["\""] = "\""; escapes["\\"] = "\\"; escapes["/"] = "/"
+      escapes["b"] = sprintf("%c", 8); escapes["f"] = sprintf("%c", 12)
+      escapes["n"] = "\n"; escapes["r"] = "\r"; escapes["t"] = "\t"
     }
     {
-      if (length(doc) + length($0) + 1 > 8388608) bad("exceeds the 8 MiB input limit")
-      doc = doc $0 "\n"
+      line_size = length($0)
+      input_size += line_size + 1
+      if (input_size > 8388608) bad("exceeds the 8 MiB input limit")
+      # Pack short lines too: an 8 MiB file of blank lines must not allocate
+      # one array entry per byte before parsing starts.
+      if (length(pending) + line_size < 1024) pending = pending $0 "\n"
+      else { add_chunks($0, line_size); add_chunks("\n", 1) }
     }
     END {
       if (failed) exit 2
+      if (length(pending)) chunks[++chunk_count] = pending
       pos = 1
       ws()
-      if (substr(doc, pos, 1) != "{") bad("JSON must be an object with a results array")
+      if (peek() != "{") bad("JSON must be an object with a results array")
       object_value(0, "root")
       ws()
-      if (pos <= length(doc)) bad("contains trailing data after the JSON document")
+      if (peek() != "") bad("contains trailing data after the JSON document")
       if (!found_results) bad("JSON must contain a results array")
       for (i = 1; i <= rows; i++) print pairs[i]
     }
@@ -6770,7 +6892,8 @@ _snapshot_enter_directory() {
       mkdir -m 700 "$component" 2>/dev/null || return 2
     fi
     [[ -d "$component" ]] || return 2
-    cd -P -- "$component" || return 2
+    # An explicit relative path bypasses the caller's CDPATH and its stdout.
+    cd -P -- "./$component" || return 2
     owner=$(stat -f '%u' .) || return 2
     mode=$(stat -f '%Lp' .) || return 2
     [[ "$owner" == "$EUID" || "$owner" == 0 ]] || return 2
@@ -7310,6 +7433,7 @@ main() {
   # System probes must not resolve to project-local wrappers. The two standard
   # package prefixes are used only after Apple tools, for the opt-in gh probe.
   PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
+  unset CDPATH
   export PATH LC_ALL=C
   parse_args "$@"
   if [[ "$EUID" -eq 0 ]]; then

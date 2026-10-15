@@ -129,6 +129,6 @@ Exit code: `0` if no diffs, `1` if any diff, `2` on error (file missing, parse e
 
 ## Input limits and verification coverage
 
-Diff and trend accept UTF-8 JSON up to 8 MiB, 10,000 result rows, and 64 levels of nesting. They reject duplicate object keys, duplicate IDs, malformed strings, trailing data, and NUL escapes. Results need not be the final root member. A `skip` transition indicates a change in verification coverage; it is not proof of an improvement or regression.
+Diff and trend accept UTF-8 JSON up to 8 MiB, 10,000 result rows, 250,000 total JSON values (including objects and arrays), and 64 levels of nesting. The parser uses bounded input chunks and a value limit to control work on large metadata and collections. It rejects duplicate object keys, duplicate IDs, malformed strings, trailing data, and NUL escapes, without emitting partial results. Results need not be the final root member. A `skip` transition indicates a change in verification coverage; it is not proof of an improvement or regression.
 
 The HTML companion applies its own shape and count validation, including a 16 MiB input limit, 10,000 rows, and 65,536 characters per text field. It rejects an inconsistent summary. An empty `top_risks` array can mean that `--top 0` hides the list; use the summary and full result rows to assess findings.

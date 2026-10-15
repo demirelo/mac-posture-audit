@@ -93,20 +93,145 @@ esac"
   assert_recorded warn "Service accounts present in admin group: _service"
 }
 
+# Run the actual fixed find/awk reader against private fixtures. Only sudo and
+# its two absolute input paths are replaced; the probe's exit status is real.
+mock_sudoers_reader() {
+  export SUDOERS_FIXTURE_ROOT="$BATS_TEST_TMPDIR/sudoers-fixture"
+  mkdir -p "$SUDOERS_FIXTURE_ROOT/sudoers.d"
+  : >"$SUDOERS_FIXTURE_ROOT/sudoers"
+  mock_cli_script sudo '#!/bin/bash
+[[ "$1" == -n && "$2" == /usr/bin/find ]] || exit 99
+shift
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    /etc/sudoers) arg="$SUDOERS_FIXTURE_ROOT/sudoers" ;;
+    /etc/sudoers.d) arg="$SUDOERS_FIXTURE_ROOT/sudoers.d" ;;
+  esac
+  args+=("$arg")
+done
+exec "${args[@]}"'
+}
+
+@test "sudoers with no NOPASSWD text passes after a complete read" {
+  mock_sudoers_reader
+  printf 'root ALL=(ALL) ALL\n' >"$SUDOERS_FIXTURE_ROOT/sudoers"
+  printf 'alice ALL=(ALL) PASSWD: ALL\n' >"$SUDOERS_FIXTURE_ROOT/sudoers.d/local"
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = pass ]
+}
+
+@test "empty inspected sudoers files are a successful no-match read" {
+  mock_sudoers_reader
+  : >"$SUDOERS_FIXTURE_ROOT/sudoers.d/empty"
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = pass ]
+}
+
 @test "sudo denial cannot produce a safe sudoers result" {
   mock_cli_script sudo $'#!/bin/bash\nexit 1'
   _check_sudo_nopasswd
   [ "$(_status_of user.sudo.nopasswd)" = skip ]
 }
 
+@test "sudoers read failure with no match remains unverified" {
+  mock_sudoers_reader
+  printf 'root ALL=(ALL) ALL\n' >"$SUDOERS_FIXTURE_ROOT/sudoers"
+  rmdir "$SUDOERS_FIXTURE_ROOT/sudoers.d"
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = skip ]
+}
+
+@test "batched find propagates an awk file read failure" {
+  mock_sudoers_reader
+  run /usr/bin/find -P "$SUDOERS_FIXTURE_ROOT/sudoers" -type f \
+    -exec /usr/bin/awk '/NOPASSWD/ { print }' "$SUDOERS_FIXTURE_ROOT/missing" {} +
+  [ "$status" -ne 0 ]
+}
+
+@test "sudoers include directory loop remains unverified" {
+  mock_sudoers_reader
+  ln -s . "$SUDOERS_FIXTURE_ROOT/sudoers.d/loop"
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = skip ]
+}
+
+@test "dangling sudoers include remains unverified" {
+  mock_sudoers_reader
+  ln -s missing "$SUDOERS_FIXTURE_ROOT/sudoers.d/dangling"
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = skip ]
+}
+
+@test "dangling main sudoers file remains unverified" {
+  mock_sudoers_reader
+  rm "$SUDOERS_FIXTURE_ROOT/sudoers"
+  ln -s missing "$SUDOERS_FIXTURE_ROOT/sudoers"
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = skip ]
+}
+
+@test "main sudoers directory cannot produce a safe result" {
+  mock_sudoers_reader
+  rm "$SUDOERS_FIXTURE_ROOT/sudoers"
+  mkdir "$SUDOERS_FIXTURE_ROOT/sudoers"
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = skip ]
+}
+
+@test "regular file in place of sudoers include directory remains unverified" {
+  mock_sudoers_reader
+  rmdir "$SUDOERS_FIXTURE_ROOT/sudoers.d"
+  : >"$SUDOERS_FIXTURE_ROOT/sudoers.d"
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = skip ]
+}
+
+@test "sudoers FIFO remains unverified without opening it" {
+  mock_sudoers_reader
+  mkfifo "$SUDOERS_FIXTURE_ROOT/sudoers.d/pipe"
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = skip ]
+}
+
+@test "partial sudoers output containing only a comment remains unverified" {
+  mock_cli_script sudo $'#!/bin/bash\necho "# example NOPASSWD: ALL"\nexit 2'
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = skip ]
+}
+
 @test "partial sudoers read with a NOPASSWD match still fails" {
-  mock_cli_script sudo $'#!/bin/bash\necho "alice ALL=(ALL) NOPASSWD: ALL"\nexit 2'
+  mock_sudoers_reader
+  printf 'alice ALL=(ALL) NOPASSWD: ALL\n' >"$SUDOERS_FIXTURE_ROOT/sudoers"
+  rmdir "$SUDOERS_FIXTURE_ROOT/sudoers.d"
   _check_sudo_nopasswd
   [ "$(_status_of user.sudo.nopasswd)" = fail ]
 }
 
+@test "many sudoers finding markers still fail with pipefail enabled" {
+  mock_cli_script sudo '#!/bin/bash
+for ((i = 0; i < 10000; i++)); do printf "AUDIT_NOPASSWD\n"; done'
+  set -o pipefail
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = fail ]
+}
+
+@test "diagnostic containing marker text is not an active policy finding" {
+  mock_cli_script sudo $'#!/bin/bash\necho "find: /etc/sudoers.d/AUDIT_NOPASSWD: read failed"\nexit 0'
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = skip ]
+}
+
 @test "commented NOPASSWD does not produce a false failure" {
-  mock_cli_script sudo $'#!/bin/bash\necho "  # example NOPASSWD: ALL"\nexit 0'
+  mock_sudoers_reader
+  printf '  # example NOPASSWD: ALL\n' >"$SUDOERS_FIXTURE_ROOT/sudoers"
   _check_sudo_nopasswd
   [ "$(_status_of user.sudo.nopasswd)" = pass ]
+}
+
+@test "active NOPASSWD in an included file fails" {
+  mock_sudoers_reader
+  printf 'alice ALL=(ALL) NOPASSWD: ALL\n' >"$SUDOERS_FIXTURE_ROOT/sudoers.d/local"
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = fail ]
 }
