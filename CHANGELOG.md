@@ -66,7 +66,7 @@ Security, privacy, and reliability release with macOS 27 support.
   [`docs/schema.md`](docs/schema.md#evidence-added-v170); agent guidance:
   [`docs/AGENTS.md`](docs/AGENTS.md).
 - **OpenSSF Scorecard** — `scorecard.yml` workflow + README badge, publishing to the public Scorecard API. Score moved 3.9 → 7.5 over a hardening pass.
-- **Signed releases** — `release.yml` builds a release tarball on every `v*` tag (and on demand via `workflow_dispatch`), signs it with Sigstore-cosign keyless OIDC (`.sigstore` bundle), and attaches an SLSA build-provenance attestation (`.intoto.jsonl`) + a SHA-256 sum. Pairs with the existing SSH-signed git tag. v1.6.0 was back-filled with signed assets.
+- **Signed releases** — `release.yml` builds a release tarball on every `v*` tag (and on demand via `workflow_dispatch`), signs it with Sigstore-cosign keyless OIDC (`.sigstore` bundle), and attaches an SLSA build-provenance attestation (`.intoto.jsonl`) + a SHA-256 sum. Provenance binds the archive to its tested tag and commit. v1.6.0 was back-filled with signed assets.
 - **CodeQL** — `codeql.yml` static analysis over the Python surface (`tools/render_report.py` + test helpers). The audit script stays covered by shellcheck + the read-only tripwire.
 - **ClusterFuzzLite + Atheris fuzzing** — `.clusterfuzzlite/` harness fuzzes `tools/render_report.py` against malformed/hostile JSON (PR 60s, batch 30min/6h, weekly prune+coverage).
 - **Dependabot** — `github-actions` updates so the SHA-pinned actions stay current (now grouped monthly — see Changed).

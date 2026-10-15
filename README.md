@@ -56,7 +56,7 @@ less mac-posture-audit.sh          # 1. Read it — the whole tool is one file.
 shasum -a 256 mac-posture-audit.sh # 4. Pin a checksum for later re-pulls.
 ```
 
-The tripwire has regression tests (`tests/check-read-only/should_{pass,fail}/`). Release tags can be verified with their signing key; `git tag -v` only means something once you've trusted the signer's key out-of-band (GitHub publishes pubkeys at `/<user>.keys`). See [SECURITY.md](./SECURITY.md) for probe restrictions, their limits, and the narrow `sqlite3 -readonly -init /dev/null` / read-only-verb `osascript` exceptions.
+The tripwire has regression tests (`tests/check-read-only/should_{pass,fail}/`). Verify release tarballs with their Sigstore bundles and GitHub provenance. Earlier SSH-signed tags can also be checked with `git tag -v` once you trust the signer's key out-of-band (GitHub publishes public keys at `/<user>.keys`). See [SECURITY.md](./SECURITY.md) for probe restrictions, their limits, and the narrow `sqlite3 -readonly -init /dev/null` / read-only-verb `osascript` exceptions.
 
 See [Scorecard maintenance](docs/scorecard.md) for the dated score, scan repair, and remaining review requirements.
 
