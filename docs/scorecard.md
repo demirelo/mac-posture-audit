@@ -16,23 +16,24 @@ A fresh public scan at 19:11 UTC on the same day measured **8.2/10** for
 `fd5b8ac16433e0e8686548254c980aada5b4f013`: Maintained increased to 8 and SAST
 to 10. The 19:34 UTC report measured **8.3/10** for
 `12b720e7e8f4f3691db0321eb487b142aadc7b7f`, with Maintained and SAST both at 10.
-The table below retains the 18:36 baseline for comparison.
+The final scan at **20:14:58 UTC** measured **8.3/10** for released commit
+`a762a9c43b25619354fba1ca9e1f0224a1140edc`. The table below shows that result.
 
 The stale-token scan failure has been repaired. Publication now uses the
 short-lived GitHub token. Only public repository metadata and source-analysis
 results are published; host audits and private configuration are not inputs.
 
-| Check | Published score | Next useful action |
+| Check | Current score | Next useful action |
 | --- | --- | --- |
 | Code Review | 0 | Obtain independent human review before merging changes. AI review does not count as human approval. |
 | Branch Protection | 4 | Recruit a second maintainer before requiring approvals. Existing protections remain active, with review-thread resolution added. |
 | CII Best Practices | 0 | Complete the OpenSSF Best Practices questionnaire with evidence and honest answers. No badge is claimed. |
 | Contributors | 0 | Attract real independent contributors. Do not create artificial contributors or affiliations. |
-| Maintained | 7 | Merge useful, tested changes and maintain the project. Do not create empty commits or artificial issue activity. |
-| SAST | 9 | Keep CodeQL scans successful on PR heads; historical coverage improves only as new reviewed changes accumulate. |
+| Maintained | 10 | Merge useful, tested changes and maintain the project. Do not create empty commits or artificial issue activity. |
+| SAST | 10 | Keep CodeQL scans successful on PR heads and the default branch. |
 | Packaging | -1 | This check is unscored. Retain the signed tarball distribution; an unrelated package publication is not needed. |
 
-All other scored checks were 10 in that report. Configuration changes do not
+All other scored checks were 10 in the final report. Configuration changes do not
 establish a higher score until a fresh published scan measures them.
 
 ## Controls checked on 2026-10-15

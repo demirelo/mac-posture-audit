@@ -2,7 +2,7 @@
 
 This directory holds a ready-to-publish Homebrew formula
 ([`mac-posture-audit.rb`](mac-posture-audit.rb)) pinned to the signed,
-SLSA-attested **v1.6.0** release tarball by SHA-256.
+SLSA-attested **v1.7.0** release tarball by SHA-256.
 
 The formula is not live yet. Homebrew resolves `brew install
 demirelo/tap/mac-posture-audit` only when the formula lives in a **tap**
@@ -26,7 +26,7 @@ cp packaging/homebrew/mac-posture-audit.rb homebrew-tap/Formula/mac-posture-audi
 # 3. Commit and push.
 cd homebrew-tap
 git add Formula/mac-posture-audit.rb
-git commit -m "Add mac-posture-audit formula (pinned to v1.6.0 signed release)"
+git commit -m "Add mac-posture-audit formula (pinned to v1.7.0 signed release)"
 git push
 ```
 
@@ -40,13 +40,13 @@ mac-posture-audit --quick
 ## Verifying the pin before publishing
 
 The `sha256` in the formula is the content of the release's published
-`mac-posture-audit-v1.6.0.tar.gz.sha256` asset. To re-verify it yourself:
+`mac-posture-audit-v1.7.0.tar.gz.sha256` asset. To re-verify it yourself:
 
 ```bash
-gh release download v1.6.0 --repo demirelo/mac-posture-audit \
-  --pattern 'mac-posture-audit-v1.6.0.tar.gz' --dir /tmp/mpa-verify
-shasum -a 256 /tmp/mpa-verify/mac-posture-audit-v1.6.0.tar.gz
-# Expect: d3580a9457bcaaf246d28d40c81c7a76a609d7b7639fe2c620ba69ccf9569c64
+gh release download v1.7.0 --repo demirelo/mac-posture-audit \
+  --pattern 'mac-posture-audit-v1.7.0.tar.gz' --dir /tmp/mpa-verify
+shasum -a 256 /tmp/mpa-verify/mac-posture-audit-v1.7.0.tar.gz
+# Expect: 9dd7fc65610c8348ccc4992abe46cc78f2a377eb2ff2431ac2dc5d2fc22ad796
 ```
 
 For the full supply-chain verification (cosign signature + SLSA provenance),

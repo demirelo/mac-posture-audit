@@ -17,7 +17,7 @@ cd mac-posture-audit
 Use the [latest signed release](https://github.com/demirelo/mac-posture-audit/releases/latest)
 for a versioned download. Releases include a SHA-256 checksum, a Sigstore bundle,
 and build provenance. The Homebrew tap is not published; its draft formula is
-in [`packaging/homebrew/`](packaging/homebrew/).
+in [`packaging/homebrew/`](packaging/homebrew/) and pins the verified v1.7.0 archive.
 
 ## Privacy and report handling
 
