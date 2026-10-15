@@ -85,3 +85,28 @@ esac"
   count=$(grep -c 'GroupMembership' "$TRACE")
   [[ "$count" -eq 1 ]]
 }
+
+@test "underscore service accounts in admin remain visible" {
+  mock_dscl_admin "alice _service"
+  QUICK=true
+  section_20_users_sudo
+  assert_recorded warn "Service accounts present in admin group: _service"
+}
+
+@test "sudo denial cannot produce a safe sudoers result" {
+  mock_cli_script sudo $'#!/bin/bash\nexit 1'
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = skip ]
+}
+
+@test "partial sudoers read with a NOPASSWD match still fails" {
+  mock_cli_script sudo $'#!/bin/bash\necho "alice ALL=(ALL) NOPASSWD: ALL"\nexit 2'
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = fail ]
+}
+
+@test "commented NOPASSWD does not produce a false failure" {
+  mock_cli_script sudo $'#!/bin/bash\necho "  # example NOPASSWD: ALL"\nexit 0'
+  _check_sudo_nopasswd
+  [ "$(_status_of user.sudo.nopasswd)" = pass ]
+}

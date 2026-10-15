@@ -6,11 +6,12 @@ meant to be safe against an attacker-controlled posture.json (e.g. one shared
 by a collaborator); this fuzzer keeps it honest.
 
 Run locally:
-    pip install atheris
-    python3 .clusterfuzzlite/fuzz_render_report.py
+    python3 -m venv /tmp/mac-posture-fuzz
+    /tmp/mac-posture-fuzz/bin/pip install --require-hashes -r .clusterfuzzlite/requirements.txt
+    /tmp/mac-posture-fuzz/bin/python .clusterfuzzlite/fuzz_render_report.py
 """
 
-import json
+import io
 import os
 import sys
 
@@ -28,23 +29,26 @@ with atheris.instrument_imports():
     import render_report  # noqa: E402  (post-instrumentation import)
 
 
+@atheris.instrument_func
 def TestOneInput(data: bytes) -> None:
-    # Decode the fuzzer's random bytes as UTF-8 JSON. If parsing fails we
-    # return early — render_report doesn't open the file itself, it expects
-    # a Python dict, so non-JSON inputs are not a meaningful fuzz state.
+    # Use the CLI's bounded, strict UTF-8 loader, including duplicate-key and
+    # numeric limits. ValueError includes JSONDecodeError/UnicodeDecodeError;
+    # deeply nested JSON can also raise the documented RecursionError.
     try:
-        doc = json.loads(data.decode("utf-8", errors="replace"))
-    except (json.JSONDecodeError, ValueError):
+        doc = render_report.read_document(io.BytesIO(data))
+    except (ValueError, RecursionError):
         return
-    if not isinstance(doc, dict) or "results" not in doc:
-        return
+
+    # validate() documents ValueError for invalid report fields. Do not hide
+    # KeyError, TypeError, AttributeError, or other implementation failures.
     try:
-        render_report.render(doc)
-    except (KeyError, TypeError, AttributeError, ValueError):
-        # These are "expected" failure modes for hostile JSON: a missing or
-        # wrong-typed field. They are not crashes — the wrapper main() converts
-        # them to exit-2 user errors. Atheris should keep mutating.
+        render_report.validate(doc)
+    except ValueError:
         return
+
+    # Once validation has accepted a document, rendering and UTF-8 output must
+    # succeed. Keep this outside both rejection handlers so real bugs crash.
+    render_report.render(doc).encode("utf-8")
 
 
 def main() -> None:

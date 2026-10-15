@@ -58,3 +58,47 @@ exec "$@"'
 
   assert_recorded skip "bputil boot security check"
 }
+
+@test "failed integrity probes cannot report an enabled or disabled state" {
+  load_script
+  mock_cli csrutil csrutil/enabled.txt 1
+  mock_cli spctl spctl/enabled.txt 1
+  mock_cli fdesetup fdesetup/on.txt 1
+
+  section_01_system_integrity
+
+  [ "$(_status_of system.sip.enabled)" = skip ]
+  [ "$(_status_of system.gatekeeper.enabled)" = skip ]
+  [ "$(_status_of system.filevault.on)" = skip ]
+}
+
+@test "custom SIP configuration is not mistaken for fully enabled protection" {
+  load_script
+  mock_cli_script csrutil '#!/bin/bash
+printf "System Integrity Protection status: unknown (Custom Configuration).\nFilesystem Protections: enabled\n"'
+  mock_cli_script spctl '#!/bin/bash
+echo "unexpected status output"'
+  mock_cli_script fdesetup '#!/bin/bash
+echo "status unavailable"'
+
+  section_01_system_integrity
+
+  [ "$(_status_of system.sip.enabled)" = skip ]
+  [ "$(_status_of system.gatekeeper.enabled)" = skip ]
+  [ "$(_status_of system.filevault.on)" = skip ]
+}
+
+@test "unrecognized boot policy output is skipped without false failures" {
+  load_script
+  mock_cli csrutil csrutil/enabled.txt
+  mock_cli spctl spctl/enabled.txt
+  mock_cli fdesetup fdesetup/on.txt
+  mock_cli_script sudo '#!/bin/bash
+echo "unsupported policy format"'
+  IS_APPLE_SILICON=true
+
+  section_01_system_integrity
+
+  [ "$(_status_of boot.secure.full)" = skip ]
+  [ "$(_status_of boot.kexts.disabled)" = skip ]
+}

@@ -1,0 +1,26 @@
+{
+  "host": "synthetic-<host> & \"example\"",
+  "macos": "27.0.1",
+  "arch": "arm64",
+  "summary": {"pass": 1, "warn": 2, "fail": 2, "skip": 1, "total": 6},
+  "executive_verdict": {
+    "profile": "normal",
+    "tier": "urgent",
+    "text": "Synthetic report: review <settings> & permissions.",
+    "top_counts": {"urgent": 1, "high": 1, "medium": 1, "low": 1}
+  },
+  "top_risks": [
+    {"rank": 1, "id": "fuzz.check.urgent", "status": "fail", "tier": "urgent", "effort": "low", "label": "Synthetic urgent check", "hint": "Review <urgent> & retry."},
+    {"rank": 2, "id": "fuzz.check.high", "status": "fail", "tier": "high", "effort": "medium", "label": "Synthetic high check", "hint": "Review \"high\" setting."},
+    {"rank": 3, "id": "fuzz.check.medium", "status": "warn", "tier": "medium", "effort": "high", "label": "Synthetic medium check", "hint": "Review first line.\nThen second line."},
+    {"rank": 4, "id": "fuzz.check.low", "status": "warn", "tier": "low", "effort": "low", "label": "Synthetic low check — café", "hint": "Review permission → setting."}
+  ],
+  "results": [
+    {"id": "fuzz.check.pass", "status": "pass", "label": "Synthetic passing check", "hint": ""},
+    {"id": "fuzz.check.urgent", "status": "fail", "label": "Synthetic urgent check", "hint": "Review <urgent> & retry."},
+    {"id": "fuzz.check.high", "status": "fail", "label": "Synthetic high check", "hint": "Review \"high\" setting."},
+    {"id": "fuzz.check.medium", "status": "warn", "label": "Synthetic medium check", "hint": "Review first line.\nThen second line."},
+    {"id": "fuzz.check.low", "status": "warn", "label": "Synthetic low check — café", "hint": "Review permission → setting."},
+    {"id": "fuzz.check.skip", "status": "skip", "label": "Synthetic unverified check", "hint": "Review in System Settings."}
+  ]
+}

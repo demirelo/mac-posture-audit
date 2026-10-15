@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Bash 3.2 compatible](https://img.shields.io/badge/bash-3.2%20compatible-blue)](#compatibility)
 
-A read-only, single-file shell script that audits a macOS machine's security posture and prints a colored report. Runs in seconds, makes no changes, and needs nothing beyond what ships with macOS.
+A read-only, single-file shell script that audits a macOS machine's security posture and prints a colored report. Uses stock macOS tools. Default scans do not change files or settings. The optional snapshot command saves a local report.
 
 ## Install
 
@@ -38,11 +38,14 @@ less mac-posture-audit.sh          # 1. Read it — the whole tool is one file.
 shasum -a 256 mac-posture-audit.sh # 4. Pin a checksum for later re-pulls.
 ```
 
-The tripwire is itself regression-tested (`tests/check-read-only/should_{pass,fail}/`), so the safety check has teeth. Tags and commits are SSH-signed; `git tag -v` only means something once you've trusted the signer's key out-of-band (GitHub publishes pubkeys at `/<user>.keys`). See [SECURITY.md](./SECURITY.md) for the full read-only guarantee and the narrow `sqlite3 -readonly` / read-only-verb `osascript` exceptions.
+The tripwire has regression tests (`tests/check-read-only/should_{pass,fail}/`). Release tags can be verified with their signing key; `git tag -v` only means something once you've trusted the signer's key out-of-band (GitHub publishes pubkeys at `/<user>.keys`). See [SECURITY.md](./SECURITY.md) for probe restrictions, their limits, and the narrow `sqlite3 -readonly -init /dev/null` / read-only-verb `osascript` exceptions.
+
+See [Scorecard maintenance](docs/scorecard.md) for the dated score, scan repair, and remaining review requirements.
 
 ## What it checks
 
-30 sections, 183 checks, by theme:
+30 sections with 184 fixed check IDs, plus instance-specific IDs. The number of
+rows in a run depends on the OS and installed software. Checks by theme:
 
 - **System integrity** — SIP, Gatekeeper, FileVault, Apple Silicon Secure Boot, third-party kernel extensions.
 - **Login & privacy** — auto-login, screen-lock delay, Touch ID for sudo, Apple ads/analytics, Lockdown Mode.
@@ -67,12 +70,11 @@ Every run ends with an **Executive Verdict** — a profile-aware one-line read p
 
 ```bash
 ./mac-posture-audit.sh                                        # default: offline, read-only
-sudo ./mac-posture-audit.sh                                   # fuller audit; privileged probes skip without sudo
 ./mac-posture-audit.sh --network                              # opt-in live checks (NextDNS routing, gh auth)
 ./mac-posture-audit.sh --json --quick --redact > posture.json # shareable machine-readable report
 ```
 
-`--quick` skips privileged checks; `sudo` unlocks Secure Boot details, Remote Login, TCC permission holders, and sudoers. The default run is offline — `--network` is the only path to an external call.
+Run the audit as your normal user. Whole-script root execution is rejected. Without `--quick`, individual checks use `sudo -n` if access is already available; the audit does not ask for a password. A failed privileged read is unverified, not a pass. The default run is offline; `--network` permits the two documented network probes.
 
 | Flag | Effect |
 |---|---|
@@ -85,7 +87,7 @@ sudo ./mac-posture-audit.sh                                   # fuller audit; pr
 | `--diff PATH` | Compare against a saved `--json` run; print one line per id whose status changed. |
 | `--exposure-catalog PATH` | Load a deny-list of known-bad extension/MCP/brew/bundle IDs. See [Exposure catalogs](#exposure-catalogs). |
 | `--summary-line` | Append one parseable summary line: `… pass=N warn=N fail=N skip=N`. Combines with `--json`. |
-| `--top N` | Cap the "Top risks to address" list to N items (default 7). `--top 0` hides the list but keeps the Executive Verdict. |
+| `--top N` | Cap the "Top risks to address" list to N items (0–1000; default 7). `--top 0` hides the list but keeps the Executive Verdict. |
 | `--explain ID` | Print the threat rationale + per-profile severity for one check id (e.g. `chain.fake_interview`) and exit, without scanning. |
 | `--report md` | Render a shareable Markdown report (Executive Verdict + Top risks + full results table) instead of the terminal report. Honors `--redact`. |
 | `--snapshot` | Append a redacted JSON snapshot to `~/.mac-posture-audit/history/` (implies `--redact`). The only write the tool performs; default runs are read-only. |
@@ -94,6 +96,12 @@ sudo ./mac-posture-audit.sh                                   # fuller audit; pr
 | `--version` / `--help` | Show version / usage and exit |
 
 Exit code: `0` if no failures, `1` if any check fails, `2` if the script itself errors.
+
+### Probe safety and scope
+
+The audit reads npm, pnpm, and Yarn user configuration as data. It does not execute package managers, Homebrew, or Gitleaks. Project plugins and launchers cannot run through these probes. Package-policy results describe user configuration; project, environment, and version-specific overrides remain unverified. An absent user policy produces `skip`, because defaults differ by version. See [Yarn configuration](https://yarnpkg.com/configuration/yarnrc#yarnPath) for project executable selection and script settings. Homebrew tap inventory covers standard installation directories; analytics require a manual check.
+
+Direct execution uses system Bash with startup-file and imported-function loading disabled. System commands take priority over package-manager paths. The optional `gh auth status` probe still requires trust in the installed GitHub CLI. These controls do not make a compromised Mac trustworthy.
 
 ### Profiles
 
@@ -118,10 +126,10 @@ Each row carries a stable `id`, `status`, `label`, and `hint`. IDs are unique wi
 ```json
 {
   "host":"<HOST>","macos":"26.4.1","arch":"arm64",
-  "summary":{"pass":47,"warn":6,"fail":0,"skip":10,"total":63},
-  "executive_verdict":{"profile":"founder","tier":"high","text":"…","top_counts":{"urgent":0,"high":4,"medium":2,"low":1}},
+  "summary":{"pass":1,"warn":1,"fail":0,"skip":0,"total":2},
+  "executive_verdict":{"profile":"founder","tier":"medium","text":"Review the warning below.","top_counts":{"urgent":0,"high":0,"medium":1,"low":0}},
   "top_risks":[
-    {"rank":1,"id":"ext.wallet","status":"warn","tier":"high","label":"Wallet extension(s) installed: …","hint":"…"}
+    {"rank":1,"id":"network.firewall.stealth","status":"warn","tier":"medium","effort":"low","label":"Firewall stealth mode is off","hint":"Firewall Options → Enable stealth mode"}
   ],
   "results":[
     {"id":"system.sip.enabled","status":"pass","label":"SIP (System Integrity Protection) is enabled","hint":""},
@@ -164,13 +172,17 @@ Each risk also carries a remediation **effort** (`low` = flip a setting, `high` 
 The audit is read-only by default, but a few opt-in companions make the report portable and longitudinal:
 
 ```bash
-./mac-posture-audit.sh --report md > posture.md            # shareable Markdown (honors --redact)
-./mac-posture-audit.sh --json --redact | python3 tools/render_report.py > report.html   # self-contained HTML, no deps
+./mac-posture-audit.sh --report md --redact > posture.md            # shareable Markdown (honors --redact)
+./mac-posture-audit.sh --json --redact | python3 tools/render_report.py --output report.html   # self-contained HTML, no deps
 ./mac-posture-audit.sh --snapshot                          # append a redacted JSON to ~/.mac-posture-audit/history/
 ./mac-posture-audit.sh --trend                             # summarize improved/regressed checks across snapshots
 ```
 
-`--snapshot` is the **only** write the tool ever performs (to its own data dir, redaction forced); everything else stays read-only. `tools/render_report.py` is a stdlib-only Python companion so the core stays a single shell file. For a maintained deny-list, point `--exposure-catalog` at [`catalog/known-bad.txt`](catalog/known-bad.txt) and refresh it via `git pull`.
+`--snapshot` is the only write in the audit script. It creates a private directory (`0700`) and a new file (`0600`). It rejects unsafe directory permissions, access-granting ACLs, and user-controlled symlinks. It never overwrites an existing snapshot. A failed write exits `2`; an interrupted write can leave an incomplete file. `MSA_HISTORY_DIR` can select another absolute, private directory. Review older history directories before setting their permissions to `0700`.
+
+`--trend` reports improvements, regressions, added and removed checks, and changes in verification coverage. A change to `skip` does not count as an improvement. Invalid history data exits `2`.
+
+`tools/render_report.py` is an optional Python 3 companion with no third-party dependencies. Its `--output` option creates a new private file and refuses existing files and symlinks. On macOS it removes inherited ACLs from that new file before writing. It validates report fields and counts, escapes HTML, and uses no external assets. Python is not required by the audit script. Reports remain sensitive after redaction; review them before sharing. For a maintained deny-list, point `--exposure-catalog` at [`catalog/known-bad.txt`](catalog/known-bad.txt) and refresh it via `git pull`.
 
 ### Exposure catalogs
 
@@ -218,10 +230,10 @@ Host: MacBook-Pro.local · macOS 26.4.1 · arch arm64
 
 ## Safety & privacy
 
-- **Read-only.** Never modifies any file or setting. The tripwire (`scripts/check-read-only.sh`) blocks command-position `rm`/`mv`/`cp`/`chmod`/`chown`/`defaults write`/`plutil -replace`/mutating `launchctl`, package installs (brew/npm/yarn/pnpm/pip/cargo/gem), `kill`, disk tooling, and `curl|bash` patterns, plus any network call outside `--network`. Two narrow allowlists — `sqlite3 -readonly` (TCC.db, §22) and read-only-verb `osascript` (login items, §22) — each have positive/negative fixtures.
+- **Read-only by default.** The only audit-script write is the explicit `--snapshot` report. The tripwire (`scripts/check-read-only.sh`) blocks command-position `rm`/`mv`/`cp`/`chmod`/`chown`/`defaults write`/`plutil -replace`/mutating `launchctl`, package installs (brew/npm/yarn/pnpm/pip/cargo/gem), `kill`, disk tooling, and `curl|bash` patterns, plus any network call outside `--network`. Two narrow allowlists — `sqlite3 -readonly -init /dev/null` (TCC.db before macOS 27, §22) and read-only-verb `osascript` (login items, §22) — each have positive/negative fixtures.
 - **Offline by default.** `--network` is the only path to an external call (NextDNS routing, `gh auth status`).
 - **Bash 3.2 compatible.** Works on stock macOS without `brew install bash`, and makes no assumptions about your folder layout, email, or installed apps.
-- **Output is sensitive.** It maps which credential files live in `$HOME`, which TCC services have approved clients, which agents are installed, and which VPN/AV/wallet apps run — reading it tells someone what to attack. Use `--redact` before sharing; it masks hostnames, emails, usernames, IPs, `$HOME` paths, and brand names, and the credential check only ever prints filenames (`grep -l`). Redaction is asserted leak-free on every CI build ([tests/integration/redaction.bats](tests/integration/redaction.bats)).
+- **Output is sensitive.** It maps which credential files live in `$HOME`, which TCC services have approved clients, which agents are installed, and which VPN/AV/wallet apps run — reading it tells someone what to attack. Use `--redact` before sharing; it masks hostnames, emails, usernames, IPs, `$HOME` paths, and brand names, and the credential check only ever prints filenames (`grep -l`). CI tests known redaction cases ([tests/integration/redaction.bats](tests/integration/redaction.bats)).
 
 For a one-line skim, this should only surface read-only probes, hint text, or the opt-in network checks:
 
@@ -234,14 +246,16 @@ grep -En 'sudo|curl|gh |rm |mv |cp |chmod|chown|defaults|plutil|launchctl|kill|b
 ```bash
 brew install bats-core shellcheck shfmt
 
-bash -n mac-posture-audit.sh
-shellcheck -S warning mac-posture-audit.sh scripts/check-read-only.sh tests/helpers.bash
-shfmt -d -i 2 mac-posture-audit.sh scripts/check-read-only.sh tests/helpers.bash
-./scripts/check-read-only.sh
-bats tests/sections tests/integration
+./scripts/test.sh --check-tools
+./scripts/test.sh
 ```
 
-The Bats suite sources the script as a library with fixtures/mocked macOS CLIs for section-level tests; integration tests run the real script in `--quick` mode and assert JSON validity, redaction, argument handling, and summary-counter parity.
+The test runner checks syntax, ShellCheck, formatting, safety-checker fixtures, Bats tests, and Python tests. It gives Bats a temporary home directory. Section tests use fixtures. Some integration tests run real, read-only macOS probes in `--quick` mode; they check report structure, redaction, arguments, and counters.
+
+Tests require Python 3.9 or later. On Apple silicon, use arm64 or universal test
+tools. `--check-tools` checks whether each required tool can run before any
+tests start. If a working version is already installed, put its directory first
+in `PATH`. See the [macOS 27 notes](docs/macOS-27.md) for Rosetta limits.
 
 ## Compatibility
 
@@ -249,10 +263,16 @@ The Bats suite sources the script as a library with fixtures/mocked macOS CLIs f
 
 | Type | Environment |
 |---|---|
-| Manual full run | macOS 26.5 (Tahoe), arm64, Bash 3.2.57 |
+| Local automated tests and host smoke | macOS 27.0.1 (build 26A434), arm64, Bash 3.2.57. Section fixtures and real read-only `--quick` integration probes ran on this host; this is not full privileged validation. |
+| Earlier manual full run | macOS 26.5 (Tahoe), arm64, Bash 3.2.57 |
 | CI | GitHub Actions `macos-latest` — the exact `sw_vers` / `uname -m` / Bash version per release is printed in the Safety workflow's "Print runtime versions" step. |
 | Expected compatible | macOS Sequoia (15), Sonoma (14), Ventura (13). Older releases may use legacy `defaults` formats that some checks skip on cleanly. |
-| Architecture | Apple Silicon (primary, manually tested); Intel supported, with Apple-Silicon boot-security checks becoming n/a. |
+| Architecture | Apple silicon for macOS 27. Intel support applies to compatible earlier macOS releases; Apple-silicon boot-security checks are not applicable on Intel. |
+
+On macOS 27+, direct TCC database checks report `skip` with manual review
+guidance. Background Security Improvements and Apple Intelligence settings also
+need explicit review. See [macOS 27 coverage and test limits](docs/macOS-27.md)
+for the verified platform changes, Apple sources, and the scope of local tests.
 
 ## What this isn't
 

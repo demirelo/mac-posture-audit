@@ -90,3 +90,60 @@ esac'
   # After the section, the caller's nullglob state must be restored.
   ! shopt -q nullglob
 }
+
+@test "unclassified SSH keys never produce an encrypted-key posture pass" {
+  load_script
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME/.ssh"
+  : >"$HOME/.ssh/id_ed25519"
+  mock_cli_script ssh-keygen '#!/bin/bash
+echo "invalid format" >&2
+exit 255'
+  export SSH_AUTH_SOCK="$HOME/secretive-agent.sock"
+
+  section_11_ssh
+
+  [ "$(_status_of ssh.keys.unknown)" = warn ]
+  [ "$(_status_of ssh.authsock)" = pass ]
+  [ "$(_status_of ssh.posture)" = skip ]
+  assert_recorded skip 'on-disk key protection could not be fully verified'
+}
+
+@test "mixed encrypted and unclassified SSH keys keep posture unverified" {
+  load_script
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME/.ssh"
+  : >"$HOME/.ssh/id_ed25519"
+  : >"$HOME/.ssh/id_rsa"
+  mock_cli_script ssh-keygen '#!/bin/bash
+case "$*" in
+  *id_rsa*) echo "incorrect passphrase supplied to decrypt private key" >&2 ;;
+  *) echo "invalid format" >&2 ;;
+esac
+exit 255'
+  export SSH_AUTH_SOCK="$HOME/secretive-agent.sock"
+
+  section_11_ssh
+
+  [ "$(_status_of ssh.keys.encrypted)" = pass ]
+  [ "$(_status_of ssh.keys.unknown)" = warn ]
+  [ "$(_status_of ssh.posture)" = skip ]
+}
+
+@test "verified unencrypted SSH keys still fail despite another unclassified key" {
+  load_script
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME/.ssh"
+  : >"$HOME/.ssh/id_ed25519"
+  : >"$HOME/.ssh/id_rsa"
+  mock_cli_script ssh-keygen '#!/bin/bash
+case "$*" in *id_ed25519*) exit 0 ;; esac
+echo "invalid format" >&2
+exit 255'
+  unset SSH_AUTH_SOCK
+
+  section_11_ssh
+
+  [ "$(_status_of ssh.keys.unknown)" = warn ]
+  [ "$(_status_of ssh.posture)" = fail ]
+}

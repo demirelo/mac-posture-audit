@@ -1,0 +1,7 @@
+{
+  "host": "synthetic-minimal",
+  "macos": "27.0.1",
+  "arch": "arm64",
+  "summary": {"pass": 0, "warn": 0, "fail": 0, "skip": 0},
+  "results": []
+}

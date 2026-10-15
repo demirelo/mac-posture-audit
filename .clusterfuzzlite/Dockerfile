@@ -1,9 +1,8 @@
 # ClusterFuzzLite build environment for the opt-in tools/render_report.py
 # renderer. The audit script itself is bash 3.2 — covered by shellcheck +
 # the read-only tripwire (see scripts/check-read-only.sh and the negative
-# fixtures under tests/check-read-only/should_fail/). Fuzzing exists here
-# primarily for the OpenSSF Scorecard Fuzzing signal and to harden the
-# Python rendering surface against malformed JSON inputs.
+# fixtures under tests/check-read-only/should_fail/). Fuzzing exercises the
+# production JSON loader, validator, and renderer against malformed input.
 
 # Pinned to a sha256 digest — Scorecard's Pinned-Dependencies check rejects
 # any unpinned containerImage. Refresh this digest when bumping (gcr.io is

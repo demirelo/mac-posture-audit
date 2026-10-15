@@ -15,7 +15,7 @@ load '../helpers'
   [[ "$output" == *"## Top risks to address"* ]]
   [[ "$output" == *"## All checks"* ]]
   # --redact must hold in the report too.
-  [[ "$output" == *'`<HOST>`'* ]]
+  [[ "$output" == *'&lt;HOST&gt;'* ]]
 }
 
 @test "--report rejects an unknown format" {

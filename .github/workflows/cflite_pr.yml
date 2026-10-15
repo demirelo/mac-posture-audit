@@ -20,6 +20,7 @@ jobs:
     name: ClusterFuzzLite PR fuzz (${{ matrix.sanitizer }})
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       # Needed by run_fuzzers to upload SARIF crash reports to the security tab.
       security-events: write
     strategy:
@@ -31,6 +32,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Build fuzzers
         id: build

@@ -1,0 +1,5 @@
+# Tripwire input only. Never run this file.
+exit 0
+if $NETWORK; then
+  curl https://example.invalid/ "gh auth status"
+fi

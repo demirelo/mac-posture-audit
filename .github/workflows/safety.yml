@@ -17,12 +17,15 @@ jobs:
   read-only-audit:
     name: Read-only audit checks
     runs-on: macos-latest
+    timeout-minutes: 20
     permissions:
       contents: read
 
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install test tools
         run: brew install bats-core shellcheck shfmt
@@ -46,44 +49,8 @@ jobs:
           echo "=== shfmt ==="
           shfmt --version || true
 
-      - name: Bash syntax
-        run: bash -n mac-posture-audit.sh
-
-      - name: ShellCheck
-        run: shellcheck -S warning mac-posture-audit.sh scripts/check-read-only.sh tests/helpers.bash
-
-      - name: shfmt diff
-        run: shfmt -d -i 2 mac-posture-audit.sh scripts/check-read-only.sh tests/helpers.bash
-
-      - name: Read-only safety tripwire
-        run: ./scripts/check-read-only.sh
-
-      - name: Tripwire negative tests
-        run: |
-          fail=0
-          for f in tests/check-read-only/should_pass/*.sh; do
-            if ! ./scripts/check-read-only.sh "$f" >/dev/null 2>&1; then
-              echo "::error file=$f::tripwire rejected a fixture that should be accepted"
-              fail=1
-            fi
-          done
-          # Should-fail fixtures are stored without the .sh extension and
-          # without a shebang so OpenSSF Scorecard's shell parser ignores them
-          # (otherwise it false-positives the intentional `curl | bash` and
-          # `npm install` bait as unpinned downloads, dragging Pinned-Dependencies
-          # down to ~5/10). The tripwire greps file content regardless of
-          # extension, so this rename does not weaken the negative tests.
-          for f in tests/check-read-only/should_fail/*; do
-            [ -f "$f" ] || continue
-            if ./scripts/check-read-only.sh "$f" >/dev/null 2>&1; then
-              echo "::error file=$f::tripwire failed to reject this fixture"
-              fail=1
-            fi
-          done
-          [[ "$fail" -eq 0 ]]
-
-      - name: Bats test suite
-        run: bats tests/sections tests/integration
+      - name: Static checks and fixture test suite
+        run: ./scripts/test.sh
 
       - name: JSON smoke test
         run: |

@@ -4,6 +4,7 @@ load '../helpers.bash'
 
 setup() {
   load_script
+  MACOS_VER=26.0
   # Force HOME to a tmpdir so we can deterministically control LaunchAgents.
   TEST_HOME="$BATS_TEST_TMPDIR/home"
   mkdir -p "$TEST_HOME/Library/LaunchAgents"
@@ -51,8 +52,9 @@ esac'
 
 mock_sqlite_tcc_modern() {
   mock_cli_script sqlite3 '#!/usr/bin/env bash
-db="$2"
-sql="$3"
+[[ "$1" == -readonly && "$2" == -init && "$3" == /dev/null ]] || exit 99
+db="$4"
+sql="$5"
 case "$sql" in
   "PRAGMA table_info(access);")
     printf "0|service|TEXT|1||1\n1|client|TEXT|1||2\n2|auth_value|INTEGER|0||0\n"
@@ -69,8 +71,9 @@ esac'
 
 mock_sqlite_tcc_user_only_clean() {
   mock_cli_script sqlite3 '#!/usr/bin/env bash
-db="$2"
-sql="$3"
+[[ "$1" == -readonly && "$2" == -init && "$3" == /dev/null ]] || exit 99
+db="$4"
+sql="$5"
 case "$sql" in
   "PRAGMA table_info(access);")
     if [[ "$db" == "/Library/Application Support/com.apple.TCC/TCC.db" ]]; then
@@ -264,14 +267,115 @@ esac'
   section_22_persistence_tcc
   assert_recorded skip "TCC partial scan"
   [[ "${RESULTS_PASS[*]-}" != *"none in the most-sensitive list"* ]]
+  [ "$(_status_of tcc.appleevents)" = skip ]
+  [ "$(_status_of tcc.camera_microphone)" = skip ]
+  local rows
+  rows=$(printf '%s\n' "${JSON_ROWS[@]}" | grep -E '"id":"tcc\.(appleevents|camera_microphone)"')
+  [[ "$rows" == *'unreadable scope(s): system'* ]]
+  [[ "$rows" == *'Privacy & Security'* ]]
+  [[ "$rows" != *'no approved clients'* ]]
+}
+
+@test "TCC unreadable user scope cannot pass empty AppleEvents or camera inventory" {
+  # The user DB does not exist in TEST_HOME; only the mocked system DB is read.
+  mock_osascript_empty
+  mock_crontab_empty
+  mock_sudo_tcc_passthrough
+  mock_sqlite_tcc_modern
+  QUICK=false
+  section_22_persistence_tcc
+  [ "$(_status_of tcc.appleevents)" = skip ]
+  [ "$(_status_of tcc.camera_microphone)" = skip ]
+  local rows
+  rows=$(printf '%s\n' "${JSON_ROWS[@]}" | grep -E '"id":"tcc\.(appleevents|camera_microphone)"')
+  [[ "$rows" == *'unreadable scope(s): user'* ]]
+  [[ "$rows" == *'Privacy & Security'* ]]
+  [[ "$rows" != *'no approved clients'* ]]
+}
+
+mock_tcc_probe_tripwires() {
+  export TCC_PROBE_MARKER="$BATS_TEST_TMPDIR/tcc-probe-called"
+  mock_cli_script sqlite3 '#!/bin/bash
+printf "sqlite\n" >>"$TCC_PROBE_MARKER"
+exit 99'
+  mock_cli_script sudo '#!/bin/bash
+printf "sudo\n" >>"$TCC_PROBE_MARKER"
+exit 99'
+  mock_cli_script tccutil '#!/bin/bash
+printf "tccutil\n" >>"$TCC_PROBE_MARKER"
+exit 99'
+}
+
+@test "macOS 27 TCC inventory skips database probes and gives manual review guidance" {
+  MACOS_VER=27.0.1
+  QUICK=false
+  mock_osascript_empty
+  mock_crontab_empty
+  mock_tcc_probe_tripwires
+  section_22_persistence_tcc
+
+  [ "$(_status_of tcc.holders)" = skip ]
+  [ "$(_status_of tcc.appleevents)" = skip ]
+  [ "$(_status_of tcc.camera_microphone)" = skip ]
+  [ ! -e "$TCC_PROBE_MARKER" ]
+  local rows
+  rows=$(printf '%s\n' "${JSON_ROWS[@]}" | grep '"id":"tcc\.')
+  [[ "$rows" == *'direct database access is unavailable on macOS 27+'* ]]
+  [[ "$rows" == *'On managed Macs'* ]]
+  [[ "$rows" != *'Full Disk Access'* ]]
+  [[ "$rows" != *'sudo'* ]]
+}
+
+@test "macOS 27 quick mode explains the platform limit instead of asking for sudo" {
+  MACOS_VER=27.0
+  QUICK=true
+  mock_osascript_empty
+  mock_crontab_empty
+  mock_tcc_probe_tripwires
+  section_22_persistence_tcc
+
+  [ ! -e "$TCC_PROBE_MARKER" ]
+  assert_recorded skip 'direct database access is unavailable on macOS 27+'
+  local rows
+  rows=$(printf '%s\n' "${JSON_ROWS[@]}" | grep '"id":"tcc\.')
+  [[ "$rows" != *'requires sudo'* ]]
+}
+
+@test "unknown macOS version cannot trigger a legacy TCC database probe" {
+  MACOS_VER=unknown
+  QUICK=false
+  mock_osascript_empty
+  mock_crontab_empty
+  mock_tcc_probe_tripwires
+  section_22_persistence_tcc
+
+  [ ! -e "$TCC_PROBE_MARKER" ]
+  [ "$(_status_of tcc.holders)" = skip ]
+  [ "$(_status_of tcc.appleevents)" = skip ]
+  [ "$(_status_of tcc.camera_microphone)" = skip ]
+  assert_recorded skip 'macOS version is unknown'
+}
+
+@test "TCC database helper rejects modern and malformed versions before reading files" {
+  mock_tcc_probe_tripwires
+  local version use_sudo
+  for version in 27.0 28.0 unknown 27.bad; do
+    MACOS_VER="$version"
+    for use_sudo in false true; do
+      run _tcc_query_approved "$BATS_TEST_TMPDIR/not-a-database" "$use_sudo"
+      [ "$status" -eq 1 ]
+    done
+  done
+  [ ! -e "$TCC_PROBE_MARKER" ]
 }
 
 # ─── tcc.appleevents + tcc.camera_microphone (informational) ────────────────
 
 mock_sqlite_tcc_with_appleevents_and_camera() {
   mock_cli_script sqlite3 '#!/usr/bin/env bash
-db="$2"
-sql="$3"
+[[ "$1" == -readonly && "$2" == -init && "$3" == /dev/null ]] || exit 99
+db="$4"
+sql="$5"
 case "$sql" in
   "PRAGMA table_info(access);")
     printf "0|service|TEXT|1||1\n1|client|TEXT|1||2\n2|auth_value|INTEGER|0||0\n"

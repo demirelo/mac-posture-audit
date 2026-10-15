@@ -1,0 +1,3 @@
+# Tripwire input only. Never run this file.
+exit 0
+sqlite3 -readonly -init /dev/null /tmp/never.db '.shell rm /tmp/never'

@@ -4,11 +4,42 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-The first behavioral change since v1.6.0, plus the accumulated repo hardening
-that was waiting on one. `SCRIPT_VERSION` is bumped to **1.7.0** for the new
-JSON `evidence` fields — an **additive, schema-compatible** change (a consumer
-that ignores `evidence` sees the exact pre-v1.7 row). The remaining entries are
-the supply-chain-of-the-repo hardening that had queued up under this heading.
+Security and reliability changes for the next release. These changes are not yet published.
+
+### Security fixes
+
+- Prevent package-manager, Homebrew, and Gitleaks execution during configuration checks. Read user settings and inventory as data. Reject whole-script root execution and prioritize system tools.
+- Create snapshots with private permissions and exclusive filenames. Reject unsafe directories, user symlinks, and access-granting ACLs. Report write errors as exit `2`.
+- Validate untrusted JSON before rendering or comparison. Fix HTML injection, Markdown markup injection, incomplete JSON escaping, and terminal controls in findings.
+- Give the HTML writer an exclusive `--output` option. Remove inherited macOS ACLs before writing a new report.
+- Mark failed or unknown system-integrity and SSH probes as unverified. Combine legacy and current Cargo credential files into one result. Prevent failed sudoers reads from becoming passes. Keep underscore service accounts visible. Omit credential-bearing Git helper text and rewrite URLs from reports.
+- Disable curl startup configuration and SQLite startup files for their allowed probes.
+- Close safety-checker bypasses from whole-line exemptions, wrappers, line continuations, and unrelated network guards.
+- Test release source with read-only permissions before publishing. Bind publication and provenance to the tested tag commit. Refuse replacement of existing assets.
+
+### Reliability and report changes
+
+- Use bounded structural JSON parsing and linear comparisons for diff and trend. Invalid data exits `2`. Added, removed, and unverified checks remain visible.
+- Include remediation in Markdown and HTML. Do not claim a clean report when `--top 0` hides findings. Validate `--top` in the range 0–1000.
+- Add one local/CI test command, `scripts/test.sh`, with a temporary home directory for Bats.
+- Manual release dispatch must run at the selected version tag. Older tags without the new test entry point cannot use this workflow.
+
+### Supply-chain maintenance
+
+- Replace the invalid Scorecard token override with the short-lived GitHub token and public branch rules. Keep publication permissions scoped to the analysis job.
+- Track fuzzing container and Python dependencies with Dependabot. Check that all CodeQL subactions use the same pinned version.
+- Instrument fuzz input rejection and route inputs through the strict production JSON loader. Unexpected renderer errors now fail instead of being suppressed.
+- Document the dated Scorecard baseline and the human-review and badge work still needed. Do not claim an unmeasured score increase.
+
+### macOS 27 compatibility
+
+- Keep the three TCC inventory IDs, but emit `skip` on macOS 27+ without direct database or privileged probes. Unknown versions also skip these queries. Provide manual permission-review guidance; do not assume the managed-device `tccutil list` interface is available everywhere.
+- On earlier macOS releases, keep AppleEvents and Camera/Microphone results unverified when either TCC database cannot be read. An empty partial inventory is not a clean result.
+- Validate runtime OS versions and compare major and minor numbers. Preserve Apple-silicon boot checks when a translated process reports `x86_64`.
+- Add a manual-review result for Background Security Improvements on macOS 26.1+, whose separate automatic-install setting is not verified by the existing update checks.
+- Require successful, recognized automatic-update query output. Keep explicit Off results as warnings and reject failed partial output as evidence of enabled updates.
+- Check that test dependencies can run before starting the suite. Add `scripts/test.sh --check-tools`, Python 3.9+ validation, and guidance for incompatible Intel-only tools on Apple silicon.
+- Document macOS 27.0.1 testing on arm64 and distinguish fixture and quick host tests from full privileged validation. Add Apple sources and manual review steps in [`docs/macOS-27.md`](docs/macOS-27.md).
 
 ### Added
 
@@ -19,7 +50,7 @@ the supply-chain-of-the-repo hardening that had queued up under this heading.
   `label`. Shipped for a representative first subset (`system.sip.enabled`,
   `system.gatekeeper.enabled`, `system.filevault.on`, `ssh.posture`,
   `supply.posture`, `backup.recovery_path`); more checks to follow. Flat scalars
-  only (so the stock-shell `--diff`/`--trend` parsers stay correct),
+  only for a compact, consistent evidence contract,
   redaction-safe by construction (emitted the same under `--redact`), and
   fully additive — absent on rows that don't stage it, and the `results[]`
   shape is otherwise unchanged. Staged at the check site via `ev` / `ev_raw`,

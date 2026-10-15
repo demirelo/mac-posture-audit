@@ -4,5 +4,5 @@
 # com.apple.TCC/TCC.db this way.
 exit 0
 
-sudo -n sqlite3 -readonly /Library/Application\ Support/com.apple.TCC/TCC.db \
+sudo -n sqlite3 -readonly -init /dev/null /Library/Application\ Support/com.apple.TCC/TCC.db \
   "SELECT service FROM access WHERE auth_value=2"

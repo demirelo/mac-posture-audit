@@ -1,0 +1,7 @@
+# Tripwire input only. Never run this file.
+exit 0
+if $NETWORK; then
+  echo allowed
+else
+  gh auth status
+fi

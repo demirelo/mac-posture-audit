@@ -1,0 +1,3 @@
+# Tripwire input only. Never run this file.
+exit 0
+env LANG=C /bin/rm /tmp/never

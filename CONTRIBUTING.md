@@ -6,13 +6,19 @@ Thanks for the interest. The project is small and stays that way deliberately. A
 
 These are CI-enforced; PRs that violate them will not merge.
 
-1. **Read-only.** The script never modifies any file, plist, defaults key, launchd job, or system setting. `scripts/check-read-only.sh` is a tripwire over command-position uses of mutating commands (`rm`, `mv`, `chmod`, `defaults write`, `plutil -replace`, mutating `launchctl`, package installs, `curl|bash`, …). If a new check genuinely needs a probe the tripwire blocks, it lives behind a narrow allowlist with positive *and* negative fixtures under `tests/check-read-only/`. The current allowlists are `sqlite3 -readonly` (TCC.db), read-only-verb `osascript` (login items), bare `brew tap` (listing), the NextDNS `curl` probe, and `gh auth status` — all `--network`-gated where they reach out.
+1. **Read-only.** Probes never modify settings or configuration. The explicit `--snapshot` option may create private report storage; this is the sole audit-script write exception. `scripts/check-read-only.sh` is a tripwire over command-position uses of mutating commands (`rm`, `mv`, `chmod`, `defaults write`, `plutil -replace`, mutating `launchctl`, package installs, `curl|bash`, …). If a new check genuinely needs a probe the tripwire blocks, it lives behind a narrow allowlist with positive *and* negative fixtures under `tests/check-read-only/`. The current allowlists are `sqlite3 -readonly -init /dev/null` (TCC.db), read-only-verb `osascript` (login items), the NextDNS `curl` probe, and `gh auth status` — all `--network`-gated where they reach out.
 
 2. **Bash 3.2 compatible.** Stock macOS ships `/bin/bash` 3.2.57. No associative arrays, no `${var^^}`, no `&>` (use `>foo 2>&1`), no `mapfile`. Use parallel arrays + linear scans where you'd reach for an associative array. Use `${arr[@]+"${arr[@]}"}` whenever expanding a potentially-empty array under `set -u`.
 
-3. **Stock-macOS tools only.** `bash`, `awk`, `sed`, `grep`, `defaults`, `plutil`, `pgrep`, `pmset`, `tmutil`, `csrutil`, `spctl`, `fdesetup`, `dscl`, `sw_vers`, `system_profiler`, `socketfilterfw`, `systemextensionsctl`, `scutil`, `softwareupdate`, `profiles`, `sqlite3 -readonly`, `osascript` (read-only verbs), `bputil`, `python3` (for `--diff` and the schema validator only — `python3` is part of macOS; `pip install` is not required and must not become a runtime dependency). No Homebrew packages, no `jq`, no Node.
+3. **Stock-macOS tools only.** `bash`, `awk`, `sed`, `grep`, `defaults`, `plutil`, `pgrep`, `pmset`, `tmutil`, `csrutil`, `spctl`, `fdesetup`, `dscl`, `sw_vers`, `system_profiler`, `socketfilterfw`, `systemextensionsctl`, `scutil`, `softwareupdate`, `profiles`, `sqlite3 -readonly -init /dev/null`, `osascript` (read-only verbs), `bputil`. The audit, diff, and trend paths do not require Python. Optional report rendering and tests use Python 3 with its standard library. No Homebrew packages, no `jq`, no Node.
 
 4. **Stable check IDs.** Every emitted row carries an `id` matching grammar `<area>.<subject>.<fact>` (fixed) or `<area>.<subject>.<instance>` (templated). Fixed IDs go in `tests/fixtures/expected_ids.txt`; templated patterns go in `tests/fixtures/expected_id_patterns.txt`. IDs are unique within a single run (the script exits 2 on a duplicate at runtime) and stable across runs so `--diff` works. Renaming an ID is a breaking change; bump the major version of the JSON schema (see `docs/schema.md`).
+
+## Execution boundary
+
+Run the script as a normal user. Each privileged probe uses `sudo -n`; do not run a complete audit as root. Do not add package-manager CLI calls: configuration queries can load project code. Inspect settings as data and state what remains unverified. Keep the single-file Bash 3.2 runtime and the stable row IDs.
+
+The safety checker is a static tripwire, not a shell parser or a sandbox. Add positive and negative fixtures for each accepted syntax. Review command arguments and control flow as well as checker results.
 
 ## Gotchas (real bugs we've already hit)
 
@@ -26,15 +32,10 @@ These are CI-enforced; PRs that violate them will not merge.
 
 ```bash
 brew install bats-core shellcheck shfmt
-bash -n mac-posture-audit.sh
-/bin/bash -n mac-posture-audit.sh   # explicit Bash 3.2 check
-shellcheck -S warning mac-posture-audit.sh scripts/check-read-only.sh tests/helpers.bash
-shfmt -d -i 2 mac-posture-audit.sh scripts/check-read-only.sh tests/helpers.bash
-./scripts/check-read-only.sh
-bats tests/sections tests/integration
+./scripts/test.sh
 ```
 
-CI runs all of the above on `macos-latest` plus the JSON smoke + schema validator + the strengthened redaction smoke + the tripwire positive/negative fixture suite.
+CI runs the same entry point on `macos-latest`. It covers section fixtures, real quick-mode host smoke tests with a temporary HOME, JSON schema checks, redaction cases, hostile reports, snapshot permissions, and safety-checker fixtures.
 
 ## Adding a new check
 
