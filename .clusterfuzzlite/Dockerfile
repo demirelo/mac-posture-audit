@@ -13,7 +13,7 @@
 #     -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
 #     https://gcr.io/v2/oss-fuzz-base/base-builder-python/manifests/latest \
 #     | grep -i docker-content-digest
-FROM gcr.io/oss-fuzz-base/base-builder-python@sha256:68bd7fc69673d3e46e0fc21affa28d360994985f36626ace6cc93c1119406ae6
+FROM gcr.io/oss-fuzz-base/base-builder-python@sha256:21f6fab17ace4dc76e1c56de91ee95d3d03da021df94b41056ba036f6c6f55e9
 
 # Atheris is the Google Python coverage-guided fuzzer that ClusterFuzzLite
 # uses by default for Python projects. Hash-pinned via a tiny requirements
