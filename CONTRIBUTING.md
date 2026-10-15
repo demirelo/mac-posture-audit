@@ -1,6 +1,44 @@
 # Contributing
 
-Thanks for the interest. The project is small and stays that way deliberately. A few hard rules and a few "this will save you a round-trip in review" gotchas.
+Contributions are welcome, including independent security review, macOS compatibility fixtures, documentation corrections and false-positive fixes. The audit keeps a small, read-only runtime.
+
+## Feedback and first contributions
+
+Use [GitHub issues](https://github.com/demirelo/mac-posture-audit/issues) for
+bugs and feature proposals, and pull requests for changes. English reports and
+comments are welcome. Read [SECURITY.md](SECURITY.md#reporting-a-vulnerability)
+before reporting a possible vulnerability; use its private reporting channel.
+
+Start with a narrow, reproducible correction: a wrong status, a missing error
+case, an outdated help example or a synthetic compatibility fixture. State the
+check ID, expected behavior and why the existing signal is insufficient. Keep
+new fixtures synthetic. Do not attach a real host report, screenshot, credential,
+private path, company configuration or inventory. Redaction alone does not make
+a host report anonymous.
+
+The maintainer triages proposals, discusses scope, reviews the patch and checks
+CI before merge. A proposal can be declined; explain a material compatibility or
+security concern so a contributor can revise it. Contributors can review and
+comment on public PRs without first receiving repository write access.
+
+## Human review and ownership
+
+`demirelo` is the current maintainer and code owner. CODEOWNERS requests that
+owner's review for eligible external PRs. It does not prove that review happened.
+Independent human reviewers are welcome, particularly for execution boundaries,
+report parsing/writes, redaction and macOS compatibility.
+
+A human review should examine the patch and use the
+[review checklist](docs/review-checklist.md). AI analysis and green CI are useful
+inputs, but do not count as an independent human approval. Do not post an
+approval automatically or add a review trailer for a review that did not occur.
+
+GitHub does not permit authors to approve their own PRs. Owner-authored PRs need
+a different human for independent review credit. This project currently has one
+maintainer; the missing second reviewer remains a disclosed gap. Required CI and
+other branch protections remain enforced. A second maintainer must be identified
+and accepted before changing repository access or requiring approvals that the
+current team cannot supply.
 
 ## Hard rules
 

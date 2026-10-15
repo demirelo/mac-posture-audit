@@ -2,6 +2,7 @@
 
 [![Safety](https://github.com/demirelo/mac-posture-audit/actions/workflows/safety.yml/badge.svg?branch=main)](https://github.com/demirelo/mac-posture-audit/actions/workflows/safety.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/demirelo/mac-posture-audit/badge)](https://scorecard.dev/viewer/?uri=github.com/demirelo/mac-posture-audit)
+[![OpenSSF Best Practices — in progress](https://www.bestpractices.dev/projects/15528/badge)](https://www.bestpractices.dev/projects/15528)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Bash 3.2 compatible](https://img.shields.io/badge/bash-3.2%20compatible-blue)](#compatibility)
 
@@ -312,6 +313,13 @@ v1.x is the public-release line. Possible directions:
 - **Per-brand killswitch verification** for ProtonVPN / NordVPN (currently advisory) and broader messaging-app coverage (Signal, Discord, WhatsApp).
 
 ## Contributing
+
+Report bugs and propose enhancements through [GitHub issues](https://github.com/demirelo/mac-posture-audit/issues).
+Use [private reporting](SECURITY.md#reporting-a-vulnerability) for security issues.
+Independent human review and synthetic macOS compatibility fixtures are welcome.
+The [registered Best Practices assessment](https://www.bestpractices.dev/projects/15528)
+is 81% complete. The [evidence record](docs/best-practices.md) lists supported
+answers and open gaps; a passing badge has not been earned.
 
 Pull requests welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the four invariants: read-only probes, bash 3.2 compatibility, stable IDs, and hermetic tests via `*_ROOTS` overrides.
 
