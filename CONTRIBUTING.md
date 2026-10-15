@@ -93,6 +93,21 @@ CI runs the same entry point on `macos-latest`. It covers section fixtures, real
 - Signed commits are welcome but are not required to contribute. Verify release signatures against the documented signer; do not assume every source commit is signed.
 - The project's MIT-licensed; by contributing you're agreeing to license your changes the same way.
 
+## Release workflow
+
+Push a version tag or dispatch the Release workflow at that same tag. The
+workflow tests the exact commit, then creates an empty draft for that version
+if none exists. It explicitly binds a newly created draft to the version tag,
+because GitHub can initially give drafts an `untagged-*` tag. Unrelated drafts
+are left untouched. API failures stop the workflow before build/signing.
+
+An existing release must be a mutable draft with no assets. The workflow checks
+its state and the tag's commit again before upload. It never replaces assets or
+publishes the draft automatically. Inspect a partial upload before retrying;
+remove only the failed draft's assets if a rebuild is needed. Do not rerun a
+published release or move its tag. After verifying the checksum, Sigstore bundle
+and build provenance, publish the prepared draft through GitHub Releases.
+
 ## Out of scope
 
 - Remediation. The audit reports posture; a separate companion tool can remediate if anyone wants to write one. Mixing observation and mutation in one binary is the wrong trust posture.
