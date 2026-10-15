@@ -1,0 +1,12 @@
+# Send only public fuzz build inputs to Docker, including remote builders.
+# Never send .git, host reports, credentials, local config, or coverage output.
+**
+!.clusterfuzzlite/
+!.clusterfuzzlite/build.sh
+!.clusterfuzzlite/fuzz_render_report.py
+!.clusterfuzzlite/requirements.txt
+!.clusterfuzzlite/seed_corpus/
+!.clusterfuzzlite/seed_corpus/full-v1.json
+!.clusterfuzzlite/seed_corpus/minimal-v1.json
+!tools/
+!tools/render_report.py
