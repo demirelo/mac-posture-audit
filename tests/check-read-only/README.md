@@ -27,4 +27,7 @@ with separate runtime checks and tests.
 
 `test_release_workflow.py` runs the actual release-tag validation against valid
 versions and hostile input. It also checks that publishing uses the tested
-commit and does not replace existing release assets.
+commit and does not replace existing release assets. A local, stateful GitHub
+API double exercises draft creation, temporary-tag correction, API failures,
+changed tags, published/immutable releases, and upload guards. It makes no
+network requests and uses no real credentials.

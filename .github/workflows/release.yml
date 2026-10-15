@@ -45,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == push ]]; then
-            [[ "$GITHUB_REF" == refs/tags/* ]]
+            [[ "$GITHUB_REF" == refs/tags/* ]] || exit 1
             tag="${GITHUB_REF#refs/tags/}"
           else
             tag="$INPUT_TAG"
@@ -76,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           sha=$(git rev-parse HEAD)
-          [[ "$sha" == "$GITHUB_SHA" ]]
+          [[ "$sha" == "$GITHUB_SHA" ]] || exit 1
           printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
 
       - name: Install test tools
@@ -113,11 +113,49 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Ensure empty draft release
+        id: draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Verify the tag still resolves to the tested commit before any write.
+          # Handle both lightweight and annotated tags.
+          ref_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha')
+          ref_type=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.type')
+          while [[ "$ref_type" == tag ]]; do
+            ref_type=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${ref_sha}" --jq '.object.type')
+            ref_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${ref_sha}" --jq '.object.sha')
+          done
+          [[ "$ref_type" == commit && "$ref_sha" == "$SOURCE_SHA" ]] || exit 1
+          # Draft releases are absent from the public tag lookup. List releases
+          # with the publisher token; API/auth errors must not mean "missing".
+          release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"${RELEASE_TAG}\") | .id")
+          if [[ -z "$release_id" ]]; then
+            release_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --method POST \
+              -f "tag_name=$RELEASE_TAG" -f "target_commitish=$SOURCE_SHA" \
+              -f "name=$RELEASE_TAG" -F draft=true --jq '.id')
+            [[ "$release_id" =~ ^[0-9]+$ ]] || exit 1
+            # GitHub can assign a temporary untagged-* name to a fresh draft.
+            # Bind only the draft we just created; never guess another draft.
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --method PATCH \
+              -f "tag_name=$RELEASE_TAG" > /dev/null
+          fi
+          [[ "$release_id" =~ ^[0-9]+$ ]] || exit 1
+          state=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            --jq '[.tag_name, .draft, (.immutable // false), (.assets | length)] | @tsv')
+          if [[ "$state" != "$RELEASE_TAG"$'\ttrue\tfalse\t0' ]]; then
+            printf 'Release must be an empty, mutable draft with the exact version tag.\n' >&2
+            exit 1
+          fi
+          printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
+
       - name: Build release tarball from committed files
         id: build
         run: |
           set -euo pipefail
-          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]] || exit 1
           dist="mac-posture-audit-${RELEASE_TAG}"
           asset="${dist}.tar.gz"
           # git archive excludes untracked files and gives reproducible metadata.
@@ -152,8 +190,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ASSET: ${{ steps.build.outputs.asset }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
         run: |
           set -euo pipefail
+          # Recheck the same draft immediately before upload. Never publish it
+          # automatically or replace assets from a completed/partial run.
+          state=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            --jq '[.tag_name, .draft, (.immutable // false), (.assets | length)] | @tsv')
+          if [[ "$state" != "$RELEASE_TAG"$'\ttrue\tfalse\t0' ]]; then
+            printf 'Draft release changed after preflight; refusing upload.\n' >&2
+            exit 1
+          fi
           # Verify the existing release still points to the tested commit. gh's
           # tag ref API handles both lightweight and annotated tags below.
           ref_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha')
@@ -162,7 +209,7 @@ jobs:
             ref_type=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${ref_sha}" --jq '.object.type')
             ref_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${ref_sha}" --jq '.object.sha')
           done
-          [[ "$ref_type" == commit && "$ref_sha" == "$SOURCE_SHA" ]]
+          [[ "$ref_type" == commit && "$ref_sha" == "$SOURCE_SHA" ]] || exit 1
           # Existing assets are immutable. A rerun must not replace them.
           gh release upload "$RELEASE_TAG" \
             "$ASSET" "${ASSET}.sha256" "${ASSET}.sigstore" "${ASSET}.intoto.jsonl"
