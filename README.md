@@ -190,7 +190,7 @@ Each risk also carries a remediation **effort** (`low` = flip a setting, `high` 
 The audit is read-only by default, but a few opt-in companions make the report portable and longitudinal:
 
 ```bash
-./mac-posture-audit.sh --report md --redact > posture.md            # shareable Markdown (honors --redact)
+./mac-posture-audit.sh --report md --redact > posture.md            # local Markdown (honors --redact)
 ./mac-posture-audit.sh --json --redact | /usr/bin/python3 tools/render_report.py --output report.html   # self-contained HTML, no deps
 ./mac-posture-audit.sh --snapshot                          # append a redacted JSON to ~/.mac-posture-audit/history/
 ./mac-posture-audit.sh --trend                             # summarize improved/regressed checks across snapshots
@@ -316,7 +316,7 @@ v1.x is the public-release line. Possible directions:
 Pull requests welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the four invariants: read-only probes, bash 3.2 compatibility, stable IDs, and hermetic tests via `*_ROOTS` overrides.
 
 For faster local validation, install GNU parallel and run
-`BATS_JOBS=4 ./scripts/test.sh`. The default is one worker. CI uses four workers
+`PATH="/usr/bin:$PATH" BATS_JOBS=4 ./scripts/test.sh`. The default is one worker. CI uses four workers
 and cancels superseded runs for the same branch; every PR and main push still
 receives validation.
 

@@ -6,11 +6,17 @@ The public report generated on 2026-10-15 at 18:36 UTC scored **8.0/10** for
 commit `b8cb1d66f07ce127d1a644df69408f9342d39a23`. The previous published report
 scored **8.2/10** for `96f423d5e0211af963f6de44a42d19c8fda1738d` on 2026-08-25.
 
-The latest report gives Maintained 7: nine commits and no issue activity in its
+The 18:36 report gives Maintained 7: nine commits and no issue activity in its
 90-day window. The earlier baseline recorded 10 for this check. The core
 supply-chain controls remain at 10: pinned dependencies, least-privilege tokens,
 fuzzing, signed releases, binary artifacts, vulnerability checks and CI tests.
 A rolling activity window can lower the aggregate without a control being removed.
+
+A fresh public scan at 19:11 UTC on the same day measured **8.2/10** for
+`fd5b8ac16433e0e8686548254c980aada5b4f013`: Maintained increased to 8 and SAST
+to 10. The 19:34 UTC report measured **8.3/10** for
+`12b720e7e8f4f3691db0321eb487b142aadc7b7f`, with Maintained and SAST both at 10.
+The table below retains the 18:36 baseline for comparison.
 
 The stale-token scan failure has been repaired. Publication now uses the
 short-lived GitHub token. Only public repository metadata and source-analysis
@@ -34,8 +40,8 @@ establish a higher score until a fresh published scan measures them.
 Repository API reads confirmed that vulnerability alerts, Dependabot security
 updates, secret scanning, secret push protection, and private vulnerability
 reporting were enabled. Active public main rules retain the existing status
-check, strict updates, linear history, no force pushes/deletion, and no admin
-bypass. Review discussions must be resolved. The classic protection remains in
+checks for the read-only suite and CodeQL, strict updates, linear history, no force pushes/deletion, and no admin
+bypass. Review discussions must be resolved. Immutable releases are enabled for future publications. The classic protection remains in
 place while the public ruleset is validated by a refreshed scan.
 
 Dependabot covers GitHub Actions, the fuzzing Docker image, and hashed Python

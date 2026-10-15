@@ -45,6 +45,7 @@ Security, privacy, and reliability release with macOS 27 support.
 - Validate runtime OS versions and compare major and minor numbers. Preserve Apple-silicon boot checks when a translated process reports `x86_64`.
 - Add a manual-review result for Background Security Improvements on macOS 26.1+, whose separate automatic-install setting is not verified by the existing update checks.
 - Require successful, recognized automatic-update query output. Keep explicit Off results as warnings and reject failed partial output as evidence of enabled updates.
+- Use Apple’s `/usr/bin/python3` from Xcode or Command Line Tools for macOS CI and report examples; local macOS 27 validation used Python 3.9.6.
 - Check that test dependencies can run before starting the suite. Add `scripts/test.sh --check-tools`, Python 3.9+ validation, and guidance for incompatible Intel-only tools on Apple silicon.
 - Document macOS 27.0.1 testing on arm64 and distinguish fixture and quick host tests from full privileged validation. Add Apple sources and manual review steps in [`docs/macOS-27.md`](docs/macOS-27.md).
 
