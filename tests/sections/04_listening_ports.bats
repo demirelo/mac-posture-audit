@@ -155,3 +155,13 @@ n0.0.0.0:3000"
   [[ "${RESULTS_WARN[*]}" == *":3000"* ]]
   [[ "${RESULTS_WARN[*]}" == *"2 TCP listener(s)"* ]]
 }
+
+@test "wildcard binding does not claim verified network reachability" {
+  load_script
+  mock_lsof "p1000
+cvite
+n0.0.0.0:5173"
+  _check_listening_all_interfaces
+  [[ "${RESULTS_WARN[*]}" == *"Binding alone does not prove reachability"* ]]
+  [[ "${RESULTS_WARN[*]}" != *"Each is reachable"* ]]
+}

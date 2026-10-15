@@ -273,7 +273,8 @@ set_status() {
   set_status "user.human.count" "pass"
   set_status "browser.default" "warn"
   section_24_ide_trust
-  assert_recorded warn "default browser is the same risk surface"
+  assert_recorded warn "separation from the wallet browser is unverified"
+  [[ "${RESULTS_WARN[*]}" != *"same risk surface"* ]]
 }
 
 @test "wallet detected with both gaps — composite warns with combined label" {

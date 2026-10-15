@@ -1050,6 +1050,8 @@ redact_list() {
 # the provider NAME, never the URL or any token embedded in it.
 _webhook_providers_in_file() {
   # _webhook_providers_in_file FILE — comma-separated provider names (or empty).
+  # Provider names in prose are not destinations. For generic bin services,
+  # require a URL-shaped endpoint rather than a bare service-name mention.
   local f="$1"
   [[ -f "$f" ]] || return 0
   local out="" probe label pat
@@ -1057,8 +1059,8 @@ _webhook_providers_in_file() {
     'Discord|discord(app)?\.com/api/webhooks' \
     'Telegram|api\.telegram\.org/bot' \
     'Slack|hooks\.slack\.com/services' \
-    'webhook.site|webhook\.site/' \
-    'RequestBin|requestbin' \
+    'webhook.site|//webhook\.site/[A-Za-z0-9_-]+|webhook\.site/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' \
+    'RequestBin|([A-Za-z0-9-]+\.)+requestbin\.(com|net)([^A-Za-z0-9-]|$)|//requestbin\.(com|net)/[A-Za-z0-9_-]+' \
     'Pipedream|pipedream\.com/e/' \
     'IFTTT|maker\.ifttt\.com/trigger' \
     'Zapier|hooks\.zapier\.com'; do
@@ -1578,9 +1580,9 @@ _check_listening_all_interfaces() {
     for h in "${hits[@]}"; do
       ports+=(":${h##*:}")
     done
-    warn "${#hits[@]} TCP listener(s) on all-interfaces: ${ports[*]}" "Each is reachable from the local network. Localhost-bind (127.0.0.1) is preferred for dev servers. Stop them when not in use, or bind to a specific interface." "network.listening.all_interfaces"
+    warn "${#hits[@]} TCP listener(s) on all-interfaces: ${ports[*]}" "Wildcard binding permits local-network access unless a firewall or other network control blocks it. Binding alone does not prove reachability. Localhost-bind (127.0.0.1) is preferred for dev servers. Stop them when not in use, or bind to a specific interface." "network.listening.all_interfaces"
   else
-    warn "TCP listeners on all-interfaces: ${hits[*]}" "Each is reachable from the local network. Localhost-bind (127.0.0.1) is preferred — most dev servers (vite, next, python -m http.server) support --host 127.0.0.1 / --bind 127.0.0.1. Stop them when not in use, or bind to a specific interface." "network.listening.all_interfaces"
+    warn "TCP listeners on all-interfaces: ${hits[*]}" "Wildcard binding permits local-network access unless a firewall or other network control blocks it. Binding alone does not prove reachability. Localhost-bind (127.0.0.1) is preferred — most dev servers (vite, next, python -m http.server) support --host 127.0.0.1 / --bind 127.0.0.1. Stop them when not in use, or bind to a specific interface." "network.listening.all_interfaces"
   fi
 }
 
@@ -3656,7 +3658,7 @@ section_14_credentials() {
     "npm Access Token|npm_[A-Za-z0-9]{36}"
 
     # AI / ML
-    "OpenAI API Key|sk-(proj-)?[A-Za-z0-9_-]{20,}"
+    "AI provider API key (sk- prefix)|sk-(proj-)?[A-Za-z0-9_-]{20,}"
     "Anthropic API Key|sk-ant-[A-Za-z0-9_-]{20,}"
     "HuggingFace User Access Token|hf_[A-Za-z0-9]{30,}"
     "Replicate API Token|r8_[A-Za-z0-9]{30,}"
@@ -5275,10 +5277,9 @@ section_24_ide_trust() {
   # the wallet workflow is isolated from everyday browsing surface:
   #   1. Multiple human user accounts (user.human.count = pass) — so the
   #      wallet user can be separate from the daily-driver user.
-  #   2. Default browser is the recommended baseline (browser.default = pass
-  #      or skip) — implying random-link browsing happens in a different
-  #      browser from the one holding the wallet, OR the user has
-  #      consciously chosen their browser.
+  #   2. Default-browser posture (browser.default). This does not compare
+  #      browser identities or verify separate wallet profiles. A warning
+  #      means separation needs review, not that both browsers are identical.
   # We deliberately do NOT include the FIDO2 gap here — that's its own
   # twofa.fido_gap composite. Keeping the indicators tightly scoped.
   local wallet_state
@@ -5294,10 +5295,10 @@ section_24_ide_trust() {
       gaps+=("single user account on this Mac")
     fi
     if [[ "$browser_state" == "warn" ]]; then
-      gaps+=("default browser is the same risk surface as the wallet browser")
+      gaps+=("default browser warning; separation from the wallet browser is unverified")
     fi
     if [[ ${#gaps[@]} -eq 0 ]]; then
-      pass "Wallet workflow shows isolation indicators (multi-user + non-default-browser posture)" "users.crypto_isolation_indicator"
+      pass "Wallet workflow shows isolation indicators (multi-user + default-browser posture; separation unverified)" "users.crypto_isolation_indicator"
     else
       local joined
       joined=$(printf '%s + ' "${gaps[@]}")
@@ -5765,10 +5766,14 @@ _check_mcp_servers() {
     [[ -z "$lcount" ]] && lcount=0
     launcher=$((launcher + lcount))
 
-    # Filesystem-capable launchers — a HEURISTIC, never a capability proof:
-    # the canonical filesystem MCP server, or args that hand a server a broad
-    # path ("/Users…", "/home…", "$HOME", "~/"). Label stays hedged.
-    fscount=$(printf '%s' "$flat" | grep -oE 'server-filesystem|"/Users/|"/home/|"\$HOME|"~/' 2>/dev/null | wc -l | tr -d '[:space:]' || true)
+    # Filesystem-capable launchers — a HEURISTIC, never a capability proof.
+    # An executable installed under HOME is not itself a filesystem grant.
+    # Remove JSON command strings (including escaped quotes) before scanning
+    # remaining path values. These may be narrowly scoped storage directories;
+    # the heuristic cannot establish the server's effective access boundary.
+    # Preserve the canonical filesystem-server signal even in command values.
+    fscount=$(printf '%s' "$flat" | sed -E 's/"command"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"//g' | grep -oE '"/Users/|"/home/|"\$HOME|"~/' 2>/dev/null | wc -l | tr -d '[:space:]' || true)
+    [[ "$flat" == *server-filesystem* ]] && fscount=$((fscount + 1))
     [[ -z "$fscount" ]] && fscount=0
     fscap=$((fscap + fscount))
 

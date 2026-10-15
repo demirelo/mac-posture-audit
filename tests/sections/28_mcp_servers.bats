@@ -295,3 +295,43 @@ write_catalog() {
 
   assert_recorded skip "No MCP config files found"
 }
+
+@test "absolute executable path alone is not a filesystem grant" {
+  load_script
+  isolate_home
+  local cfg="$BATS_TEST_TMPDIR/cursor.json"
+  write_mcp_config "$cfg" '{"mcpServers":{"graph":{"command":"/Users/me/.local/bin/codebase-memory-mcp","args":[]}}}'
+  MCP_CONFIG_PATHS=("$cfg")
+  _check_mcp_servers
+  assert_recorded pass "No MCP servers appear filesystem-capable"
+}
+
+@test "absolute executable with a storage argument retains filesystem signal" {
+  load_script
+  isolate_home
+  local cfg="$BATS_TEST_TMPDIR/cursor.json"
+  write_mcp_config "$cfg" '{"mcpServers":{"papers":{"command":"/Users/me/.local/bin/server","args":["--storage-path","/Users/me/papers"]}}}'
+  MCP_CONFIG_PATHS=("$cfg")
+  _check_mcp_servers
+  assert_recorded warn "appear filesystem-capable"
+}
+
+@test "canonical filesystem server remains detected as an absolute executable" {
+  load_script
+  isolate_home
+  local cfg="$BATS_TEST_TMPDIR/cursor.json"
+  write_mcp_config "$cfg" '{"mcpServers":{"fs":{"command":"/Users/me/bin/server-filesystem","args":[]}}}'
+  MCP_CONFIG_PATHS=("$cfg")
+  _check_mcp_servers
+  assert_recorded warn "appear filesystem-capable"
+}
+
+@test "escaped quotes in command values do not consume storage arguments" {
+  load_script
+  isolate_home
+  local cfg="$BATS_TEST_TMPDIR/cursor.json"
+  write_mcp_config "$cfg" '{"mcpServers":{"papers":{"command":"/Users/me/a\"b/server","args":["--storage-path","/Users/me/papers"]}}}'
+  MCP_CONFIG_PATHS=("$cfg")
+  _check_mcp_servers
+  assert_recorded warn "appear filesystem-capable"
+}
