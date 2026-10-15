@@ -42,6 +42,14 @@ JSON loader, and treats unexpected renderer errors as crashes. The old batch
 job was green but reported no interesting inputs after more than 515 million
 iterations. A green workflow alone does not prove useful coverage.
 
+PR validation on commit `11753a3` built both real fuzz targets and loaded the two
+synthetic seeds. The address run exercised 766,229 inputs in 61 seconds; its
+coverage counter grew from 131 to 161. The undefined run exercised 4,530,636
+inputs and reached 163. Both corpora grew from 2 to 69 inputs with no crashes.
+The PR build step also needs its short-lived token and `actions: read` to load
+previous coverage artifacts. Scheduled and coverage builds do not need that
+token for affected-target selection.
+
 ## Best Practices badge evidence
 
 The repository has a license, contribution guide, private security reporting,
@@ -60,6 +68,7 @@ a badge image until the project has an actual registered badge URL.
 - [Report API](https://api.securityscorecards.dev/projects/github.com/demirelo/mac-posture-audit)
 - [Failed scheduled run](https://github.com/demirelo/mac-posture-audit/actions/runs/38482268394)
 - [Observed fuzz run](https://github.com/demirelo/mac-posture-audit/actions/runs/38721414500)
+- [Seeded PR fuzz validation](https://github.com/demirelo/mac-posture-audit/actions/runs/38753849356)
 - [Scorecard check definitions](https://github.com/ossf/scorecard/blob/main/docs/checks.md)
 - [Scorecard ruleset support](https://github.com/ossf/scorecard/blob/v5.5.0/clients/githubrepo/branches.go)
 - [Atheris input instrumentation](https://github.com/google/atheris#why-am-i-getting-no-interesting-inputs-were-found)

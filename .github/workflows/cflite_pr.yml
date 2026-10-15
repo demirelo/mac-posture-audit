@@ -21,6 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # Build fuzzers reads prior coverage artifacts to select affected targets.
+      actions: read
       # Needed by run_fuzzers to upload SARIF crash reports to the security tab.
       security-events: write
     strategy:
@@ -39,6 +41,7 @@ jobs:
         id: build
         uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           language: python
           sanitizer: ${{ matrix.sanitizer }}
 
