@@ -6312,7 +6312,10 @@ _diff_parse_rows() {
   # change the comparison. Do not emit partial results from an invalid file.
   # Limits bound memory, recursion, and comparison work on imported reports.
   # Stock awk keeps this path usable without Python or developer tools.
-  LC_ALL=C awk -v source="$1" '
+  # Stock awk can silently truncate records at NUL. Map it to another raw
+  # control byte that is also forbidden in JSON before awk reads the input.
+  # This preserves byte counts and cannot alter any valid JSON document.
+  LC_ALL=C tr '\000' '\001' | LC_ALL=C awk -v source="$1" '
     function bad(message) {
       failed = 1
       printf "--diff: %s %s\n", source, message > "/dev/stderr"

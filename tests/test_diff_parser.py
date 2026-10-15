@@ -165,6 +165,25 @@ class DiffParserTests(unittest.TestCase):
                 self.assertEqual(parsed.stdout, b"")
                 self.assertIn(b"duplicate", parsed.stderr)
 
+    def test_raw_nul_bytes_cannot_hide_invalid_input(self):
+        valid = b'{"results":[{"id":"fixture.valid.row","status":"pass"}]}'
+        malformed = (
+            valid + b"\x00junk\n",
+            valid + b"\x00" + valid,
+            valid + b"\n\x00junk\n",
+            b"\x00" + valid,
+            valid.replace(b"fixture.valid.row", b"fixture\x00.valid.row"),
+        )
+        for raw in malformed:
+            for padding in (0, 1023, 1024, 1025):
+                with self.subTest(raw=raw, padding=padding):
+                    payload = b" " * padding + raw
+                    with self.assertRaises(json.JSONDecodeError):
+                        json.loads(payload.decode("utf-8"))
+                    parsed = self.parse_rows(payload)
+                    self.assertEqual(parsed.returncode, 2)
+                    self.assertEqual(parsed.stdout, b"")
+
     def test_tokens_cross_input_chunk_boundaries(self):
         tokens = (
             b'"a\\n\\t\\\\\\/\\\"b"', b'"\\uD83D\\uDD12"',
