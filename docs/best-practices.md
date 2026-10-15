@@ -3,11 +3,12 @@
 Assessment date: 2026-10-15. Scope: passing-level criteria for the public
 mac-posture-audit repository and v1.7.0 release.
 
-This is a proposed questionnaire, not an earned badge. The site can import
-[.bestpractices.json](../.bestpractices.json) after enrollment. Unknown (`?`)
-answers are deliberately ignored by its automation. Register once, confirm the
-imported answers, and retain unknowns until supported. Do not add a passing badge
-to the README before the service awards it.
+The [registered assessment](https://www.bestpractices.dev/projects/15528) was
+saved at **81% complete**, with status **in progress**, on 2026-10-15.
+It has not earned a passing badge. The saved answers match
+[.bestpractices.json](../.bestpractices.json): 47 Met, 6 N/A, 1 Unmet and 13
+unknown. Unknown (`?`) answers are deliberately ignored by import automation.
+Keep them unknown until supported; do not advertise passing before it is earned.
 
 The criterion identifiers and requirements come from the
 [OpenSSF Best Practices badge contributors](https://www.bestpractices.dev/en/criteria/0).
@@ -97,8 +98,9 @@ The maintainer can confirm process history without publishing report contents.
 ## Scorecard effects and review limits
 
 Scorecard gives an enrolled in-progress badge 2/10, passing 5/10, silver 7/10,
-and gold 10/10. A local proposal alone receives no credit. Registration and a
-fresh published Scorecard scan are required before reporting a score increase.
+and gold 10/10. A local proposal alone receives no credit. The published scan at
+2026-10-15 20:39:12 UTC detected this registration and scored Best Practices
+**2/10**, up from 0. The rounded overall score remained **8.3/10**.
 The unknown mandatory criteria above prevent claiming passing today.
 
 Code-Review requires a second human; AI review does not count. GitHub prevents
