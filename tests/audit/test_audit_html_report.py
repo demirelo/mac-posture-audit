@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -21,21 +22,37 @@ class HtmlReportTests(unittest.TestCase):
         mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
         for key in ('pass','warn','fail','skip','total'):
             with self.subTest(key=key):
-                doc={'results':[],'summary':{key:'<img src=x onerror="canary()">'}}
-                result=mod.render(doc)
-                self.assertNotIn('<img',result)
-                self.assertIn('&lt;img',result)
+                doc={'results':[],'summary':{'pass':0,'warn':0,'fail':0,'skip':0,'total':0}}
+                doc['summary'][key]='<img src=x onerror="canary()">'
+                # Counters are integers under the stricter contract. Reject
+                # hostile counters before any HTML is produced.
+                with self.assertRaisesRegex(ValueError, 'summary\\.'+key):
+                    mod.render(doc)
+                result=subprocess.run([sys.executable,str(ROOT/'tools/render_report.py')],input=json.dumps(doc),text=True,capture_output=True,timeout=15)
+                self.assertEqual(result.returncode,2,result.stderr)
+                self.assertEqual(result.stdout,'')
+                self.assertNotIn('Traceback',result.stderr)
+
+    def test_untrusted_text_values_are_escaped(self):
+        payload='<img src=x onerror="canary()">'
+        doc={'host':payload,'results':[{'id':'test.check.one','status':'pass','label':payload,'hint':payload}]}
+        result=subprocess.run([sys.executable,str(ROOT/'tools/render_report.py')],input=json.dumps(doc),text=True,capture_output=True,timeout=15)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertNotIn('<img',result.stdout)
+        self.assertIn('&lt;img',result.stdout)
 
     def test_malformed_document_shapes_fail_with_usage_status(self):
         for doc in ({'results':None}, {'results':['invalid']}, {'results':[], 'summary':None}, {'results':[], 'executive_verdict':[]}, {'results':[], 'top_risks':[None]}):
             with self.subTest(doc=doc):
-                result=subprocess.run(['python3',str(ROOT/'tools/render_report.py')],input=json.dumps(doc),text=True,capture_output=True,timeout=15)
+                result=subprocess.run([sys.executable,str(ROOT/'tools/render_report.py')],input=json.dumps(doc),text=True,capture_output=True,timeout=15)
                 self.assertEqual(result.returncode,2,result.stderr)
                 self.assertNotIn('Traceback',result.stderr)
                 self.assertEqual(result.stdout,'')
 
     def test_valid_report_control(self):
-        result=subprocess.run(['python3',str(ROOT/'tools/render_report.py')],input='{"results":[],"summary":{"pass":1}}',text=True,capture_output=True,timeout=15)
+        doc={'results':[{'id':'test.check.one','status':'pass','label':'Synthetic passing check','hint':''}],
+             'summary':{'pass':1,'warn':0,'fail':0,'skip':0,'total':1}}
+        result=subprocess.run([sys.executable,str(ROOT/'tools/render_report.py')],input=json.dumps(doc),text=True,capture_output=True,timeout=15)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn('1 pass',result.stdout)
 

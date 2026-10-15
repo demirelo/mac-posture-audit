@@ -19,7 +19,7 @@ class SnapshotTests(unittest.TestCase):
     def test_same_second_snapshots_append_without_clobber(self):
         with tempfile.TemporaryDirectory() as temp:
             history=Path(temp)
-            result=shell('SNAPSHOT=true; MSA_HISTORY_DIR="$1"; date() { printf 20260101-000000; }; _build_json_document() { printf \'{"sequence":%s}\\n\' "$SEQ"; }; SEQ=1; maybe_write_snapshot; SEQ=2; maybe_write_snapshot',history)
+            result=shell('SNAPSHOT=true; REDACT=true; MSA_HISTORY_DIR="$1"; date() { printf 20260101-000000; }; _build_json_document() { printf \'{"sequence":%s}\\n\' "$SEQ"; }; SEQ=1; maybe_write_snapshot; SEQ=2; maybe_write_snapshot',history)
             self.assertEqual(result.returncode,0,result.stderr)
             docs=[json.loads(p.read_text()) for p in history.glob('posture-*.json')]
             self.assertEqual(sorted(d['sequence'] for d in docs),[1,2])
@@ -27,7 +27,7 @@ class SnapshotTests(unittest.TestCase):
     def test_twelve_same_second_snapshots_keep_chronological_trend(self):
         with tempfile.TemporaryDirectory() as temp:
             history = Path(temp)
-            result = shell('''SNAPSHOT=true; MSA_HISTORY_DIR="$1"
+            result = shell('''SNAPSHOT=true; REDACT=true; MSA_HISTORY_DIR="$1"
 date() { printf 20260101-000000; }
 _build_json_document() {
   local state=pass
@@ -54,11 +54,11 @@ for SEQ in 1 2 3 4 5 6 7 8 9 10 11 12; do maybe_write_snapshot || exit; done
         with tempfile.TemporaryDirectory() as temp:
             fixture = Path(temp)
             history = fixture / 'history'
-            history.mkdir()
+            history.mkdir(mode=0o700)
             gate = fixture / 'release'
             processes = []
             body = '''source "$1"; shift
-SNAPSHOT=true; MSA_HISTORY_DIR="$1"; SEQ="$2"
+SNAPSHOT=true; REDACT=true; MSA_HISTORY_DIR="$1"; SEQ="$2"
 date() { printf 20260101-000000; }
 _build_json_document() { printf '{"sequence":%s}\n' "$SEQ"; }
 printf ready > "$3/ready-$SEQ"
@@ -90,10 +90,10 @@ maybe_write_snapshot
 
     def test_existing_snapshot_symlink_target_is_preserved(self):
         with tempfile.TemporaryDirectory() as temp:
-            history=Path(temp)/'history'; history.mkdir()
+            history=Path(temp)/'history'; history.mkdir(mode=0o700)
             sentinel=Path(temp)/'user-config'; sentinel.write_text('do not overwrite')
             (history/'posture-20260101-000000.json').symlink_to(sentinel)
-            result=shell('SNAPSHOT=true; MSA_HISTORY_DIR="$1"; date() { printf 20260101-000000; }; _build_json_document() { printf \'{"sequence":1}\\n\'; }; maybe_write_snapshot',history)
+            result=shell('SNAPSHOT=true; REDACT=true; MSA_HISTORY_DIR="$1"; date() { printf 20260101-000000; }; _build_json_document() { printf \'{"sequence":1}\\n\'; }; maybe_write_snapshot',history)
             self.assertEqual(sentinel.read_text(),'do not overwrite',result.stderr)
             self.assertEqual(result.returncode, 0, result.stderr)
             regular = [p for p in history.glob('posture-*.json') if p.is_file() and not p.is_symlink()]

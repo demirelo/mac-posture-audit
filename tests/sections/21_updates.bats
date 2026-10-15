@@ -26,26 +26,10 @@ case \"\$*\" in
 esac"
 }
 
-# section_21 is long; isolate just the auto-update branch. Keep it byte-
-# identical to what the script does so a future drift in the production
-# code without updating the test is loud.
-run_auto_update_check() {
-  if softwareupdate --schedule 2>/dev/null | grep -qi "Automatic background checks: On"; then
-    pass "Automatic update background checks are on" "update.auto"
-  else
-    ACE=$(defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled 2>/dev/null || echo "")
-    case "$ACE" in
-    1) pass "Automatic update checks on (AutomaticCheckEnabled=1)" "update.auto" ;;
-    0) warn "Automatic update checks are off (AutomaticCheckEnabled=0)" "..." "update.auto" ;;
-    *) skip "Automatic update check state unreadable" "..." "update.auto" ;;
-    esac
-  fi
-}
-
 @test "auto-update: AutomaticCheckEnabled=1 -> pass" {
   mock_softwareupdate_silent
   mock_defaults_ace 1
-  run_auto_update_check
+  _check_update_auto
   assert_recorded pass "AutomaticCheckEnabled=1"
 }
 
@@ -56,20 +40,62 @@ run_auto_update_check() {
   # explicitly turned off the schedule.
   mock_softwareupdate_silent
   mock_defaults_ace 0
-  run_auto_update_check
+  _check_update_auto
   assert_recorded warn "Automatic update checks are off"
 }
 
 @test "auto-update: key absent -> skip (not warn, since the answer is unknown)" {
   mock_softwareupdate_silent
   mock_defaults_ace ""
-  run_auto_update_check
+  _check_update_auto
   assert_recorded skip "state unreadable"
 }
 
 @test "auto-update: softwareupdate --schedule says On -> pass (preferred canonical path)" {
   mock_cli_script softwareupdate $'#!/usr/bin/env bash\nprintf "Automatic background checks: On\\n"\nexit 0'
   # Don't even need defaults; the first branch should fire.
-  run_auto_update_check
+  _check_update_auto
   assert_recorded pass "Automatic update background checks are on"
+}
+
+@test "auto-update: authoritative Off is not overridden by a stale enabled preference" {
+  mock_cli_script softwareupdate $'#!/usr/bin/env bash\nprintf "Automatic background checks: Off\\n"'
+  mock_defaults_ace 1
+  _check_update_auto
+  [ "$(_status_of update.auto)" = warn ]
+}
+
+@test "auto-update: failed probes cannot turn partial output into a pass" {
+  mock_cli_script softwareupdate $'#!/usr/bin/env bash\nprintf "Automatic background checks: On\\n"\nexit 1'
+  mock_cli_script defaults $'#!/usr/bin/env bash\nprintf "1\\n"\nexit 1'
+  _check_update_auto
+  [ "$(_status_of update.auto)" = skip ]
+}
+
+@test "auto-update: changed schedule text is not accepted as an enabled state" {
+  mock_cli_script softwareupdate $'#!/usr/bin/env bash\nprintf "Unavailable; cached Automatic background checks: On\\n"'
+  mock_defaults_ace ""
+  _check_update_auto
+  [ "$(_status_of update.auto)" = skip ]
+}
+
+@test "Background Security Improvements are separate unverified coverage on 26.1 and 27" {
+  for version in 26.1 26.5 27.0.1 28.0; do
+    reset_state
+    MACOS_VER="$version"
+    _check_background_security
+    [ "$(_status_of update.background_security)" = skip ]
+    [[ "${ROW_HINT[*]}" == *'Privacy & Security'* ]]
+    [[ "${ROW_HINT[*]}" == *'built-in startup storage'* ]]
+  done
+}
+
+@test "older macOS versions do not claim Background Security Improvements support" {
+  for version in 10.15.7 13.6 15.7 26.0 unknown; do
+    reset_state
+    MACOS_VER="$version"
+    _check_background_security
+    [ "$SKIP_N" -eq 0 ]
+    [ "$PASS_N" -eq 0 ]
+  done
 }

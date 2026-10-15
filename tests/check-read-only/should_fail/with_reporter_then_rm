@@ -1,0 +1,3 @@
+# Tripwire input only. Never run this file.
+exit 0
+pass "safe label" "safe.id"; rm /tmp/never

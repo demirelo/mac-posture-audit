@@ -1,0 +1,3 @@
+# Tripwire input only. Never run this file.
+exit 0
+sqlite3 -readonly /tmp/never.db "SELECT 1"

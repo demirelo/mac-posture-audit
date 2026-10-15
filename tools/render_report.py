@@ -3,25 +3,35 @@
 
 Opt-in companion (v1.4). The core auditor stays a single read-only shell script;
 this tool is a separate, stdlib-only renderer so the report can be shared as one
-HTML file with no external assets, no network, and no dependencies beyond the
-Python 3 that ships with macOS.
+HTML file with no external assets, no network, and no dependencies beyond an
+installed Python 3 interpreter.
 
     ./mac-posture-audit.sh --json --redact > posture.json
-    python3 tools/render_report.py posture.json > report.html
+    python3 tools/render_report.py posture.json --output report.html
     # or pipe:
-    ./mac-posture-audit.sh --json --redact | python3 tools/render_report.py > report.html
+    ./mac-posture-audit.sh --json --redact | python3 tools/render_report.py --output report.html
 
-Exit codes: 0 on success, 2 on usage/parse/validation error.
+Use --output report.html to create a private file without replacing an existing
+path. Shell redirection uses the shell's permissions and overwrite rules.
+
+Exit codes: 0 on success, 2 on input/output or usage error.
 """
 
 from __future__ import annotations
 
+import argparse
 import html
 import json
+import math
+import os
+import subprocess
 import sys
 
 TIER_ORDER = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
 STATUS_LABEL = {"pass": "PASS", "warn": "WARN", "fail": "FAIL", "skip": "SKIP"}
+MAX_INPUT_BYTES = 16 * 1024 * 1024
+MAX_ROWS = 10000
+MAX_TEXT_LENGTH = 65536
 
 CSS = """
 :root { color-scheme: light dark; }
@@ -45,6 +55,9 @@ code { font: .85em ui-monospace, SFMono-Regular, Menlo, monospace; background: #
 .tag-urgent { background: #d112; color: #d11; } .tag-high { background: #e602; color: #e60; }
 .tag-medium { background: #b802; color: #b80; } .tag-low { background: #2a82; color: #2a8; }
 .s-pass { color: #2a8; } .s-warn { color: #b80; } .s-fail { color: #d11; font-weight: 700; } .s-skip { color: #8a8a8e; }
+.hint { margin-top: .3rem; font-size: .88em; color: #666; white-space: pre-wrap; }
+@media (prefers-color-scheme: dark) { .hint { color: #aaa; } }
+td { overflow-wrap: anywhere; }
 footer { margin-top: 2.5rem; color: #8a8a8e; font-size: .82rem; }
 """
 
@@ -53,57 +66,133 @@ def esc(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
-def validate(doc: object) -> None:
-    """Check consumed shapes while allowing absent optional fields and extensions."""
-    if not isinstance(doc, dict) or "results" not in doc:
-        raise ValueError("expected an object with results")
+def _text(value: object, field: str, *, nonempty: bool = False) -> None:
+    if not isinstance(value, str) or (nonempty and not value):
+        raise ValueError(f"{field} must be a {'non-empty ' if nonempty else ''}string")
+    if len(value) > MAX_TEXT_LENGTH:
+        raise ValueError(f"{field} exceeds {MAX_TEXT_LENGTH} characters")
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+        raise ValueError(f"{field} contains an invalid Unicode surrogate")
 
-    def scalars(obj: dict, fields: tuple, path: str) -> None:
-        for field in fields:
-            if isinstance(obj.get(field), (dict, list)):
-                raise ValueError(f"{path}.{field} must be a scalar")
 
-    scalars(doc, ("host", "macos", "arch"), "report")
-    for name, fields in (
-        ("summary", ("pass", "warn", "fail", "skip", "total")),
-        ("executive_verdict", ("profile", "tier", "text")),
-    ):
-        obj = doc.get(name, {})
-        if not isinstance(obj, dict):
-            raise ValueError(f"{name} must be an object")
-        scalars(obj, fields, name)
+def _count(value: object, field: str) -> None:
+    # bool is an int subclass, but is not an audit counter.
+    if type(value) is not int or not 0 <= value <= MAX_ROWS:
+        raise ValueError(f"{field} must be an integer from 0 to {MAX_ROWS}")
 
-    for name, fields in (
-        ("results", ("status", "id", "label")),
-        ("top_risks", ("tier", "rank", "id", "label")),
-    ):
-        rows = doc.get(name, [])
-        if not isinstance(rows, list):
-            raise ValueError(f"{name} must be an array")
-        for index, row in enumerate(rows):
-            path = f"{name}[{index}]"
-            if not isinstance(row, dict):
-                raise ValueError(f"{path} must be an object")
-            scalars(row, fields, path)
-            # Ranks are compared during sorting; mixed scalar types are unsafe.
-            if name == "top_risks" and type(row.get("rank", 0)) is not int:
-                raise ValueError(f"{path}.rank must be an integer")
+
+def validate(doc: object) -> dict:
+    """Check fields used by the renderer; permit additive/legacy schema fields.
+
+    Counts and top-risk references must agree with the check rows. Validation
+    is also used by render(), so imported callers get the same protection as
+    the command line. No input data is modified.
+    """
+    if not isinstance(doc, dict) or not isinstance(doc.get("results"), list):
+        raise ValueError("input must be a mac-posture-audit object with a results array")
+    results = doc["results"]
+    if len(results) > MAX_ROWS:
+        raise ValueError(f"results exceeds {MAX_ROWS} rows")
+    for field in ("host", "macos", "arch"):
+        if field in doc:
+            _text(doc[field], field)
+
+    counts = dict.fromkeys(STATUS_LABEL, 0)
+    by_id = {}
+    for index, row in enumerate(results):
+        field = f"results[{index}]"
+        if not isinstance(row, dict):
+            raise ValueError(f"{field} must be an object")
+        _text(row.get("id"), f"{field}.id", nonempty=True)
+        _text(row.get("label"), f"{field}.label")
+        if "hint" in row:
+            _text(row["hint"], f"{field}.hint")
+        status = row.get("status")
+        if not isinstance(status, str) or status not in STATUS_LABEL:
+            raise ValueError(f"{field}.status must be pass, warn, fail, or skip")
+        if row["id"] in by_id:
+            raise ValueError(f"{field}.id duplicates another check")
+        by_id[row["id"]] = row
+        counts[status] += 1
+    counts["total"] = len(results)
+
+    if "summary" in doc:
+        summary = doc["summary"]
+        if not isinstance(summary, dict):
+            raise ValueError("summary must be an object")
+        for status in STATUS_LABEL:
+            _count(summary.get(status), f"summary.{status}")
+            if summary[status] != counts[status]:
+                raise ValueError(f"summary.{status} does not match results")
+        if "total" in summary:
+            _count(summary["total"], "summary.total")
+            if summary["total"] != len(results):
+                raise ValueError("summary.total does not match results")
+
+    verdict = doc.get("executive_verdict", {})
+    if not isinstance(verdict, dict):
+        raise ValueError("executive_verdict must be an object")
+    for field in ("profile", "text"):
+        if field in verdict:
+            _text(verdict[field], f"executive_verdict.{field}")
+    if "tier" in verdict:
+        tier = verdict["tier"]
+        if not isinstance(tier, str) or tier not in (*TIER_ORDER, "none"):
+            raise ValueError("executive_verdict.tier is not a valid priority")
+        if tier == "none" and counts["warn"] + counts["fail"]:
+            raise ValueError("executive_verdict.tier is none but results contain risks")
+
+    top = doc.get("top_risks", [])
+    if not isinstance(top, list) or len(top) > MAX_ROWS:
+        raise ValueError(f"top_risks must be an array of at most {MAX_ROWS} rows")
+    seen = set()
+    ranks = set()
+    for index, risk in enumerate(top):
+        field = f"top_risks[{index}]"
+        if not isinstance(risk, dict):
+            raise ValueError(f"{field} must be an object")
+        _text(risk.get("id"), f"{field}.id", nonempty=True)
+        _text(risk.get("label"), f"{field}.label")
+        if "hint" in risk:
+            _text(risk["hint"], f"{field}.hint")
+        tier = risk.get("tier")
+        if not isinstance(tier, str) or tier not in TIER_ORDER:
+            raise ValueError(f"{field}.tier is not a valid risk priority")
+        _count(risk.get("rank"), f"{field}.rank")
+        if not 1 <= risk["rank"] <= len(top) or risk["rank"] in ranks:
+            raise ValueError(f"{field}.rank must be unique and contiguous from 1")
+        ranks.add(risk["rank"])
+        if risk["id"] in seen:
+            raise ValueError(f"{field}.id duplicates another top risk")
+        seen.add(risk["id"])
+        original = by_id.get(risk["id"])
+        if original is None or original["status"] not in ("warn", "fail"):
+            raise ValueError(f"{field} must refer to a warning or failure in results")
+        if risk.get("status") != original["status"] or risk["label"] != original["label"]:
+            raise ValueError(f"{field} does not match its result row")
+    return counts
 
 
 def render(doc: dict) -> str:
-    validate(doc)
-    summary = doc.get("summary", {})
+    summary = validate(doc)
     verdict = doc.get("executive_verdict", {})
     top = sorted(
         doc.get("top_risks", []),
         key=lambda r: (TIER_ORDER.get(r.get("tier", ""), 9), r.get("rank", 0)),
     )
     results = doc.get("results", [])
-    tier = verdict.get("tier", "none")
-    tier_class = tier if tier in TIER_ORDER else "none"
+    tier = verdict.get("tier", "not provided")
+    # Keep CSS classes restricted even if accepted metadata expands later.
+    tier_class = tier if tier in (*TIER_ORDER, "none") else "unknown"
 
     out: list[str] = []
     out.append("<!doctype html><html lang=en><head><meta charset=utf-8>")
+    # No scripts, forms, frames, remote assets, or navigation base are needed.
+    # Escaping and validation are the primary controls; CSP is defense in depth.
+    out.append('<meta http-equiv="Content-Security-Policy" content="'
+               "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "
+               "form-action 'none'\">")
+    out.append('<meta name="referrer" content="no-referrer">')
     out.append('<meta name=viewport content="width=device-width, initial-scale=1">')
     out.append("<title>macOS Posture Audit</title>")
     out.append(f"<style>{CSS}</style></head><body>")
@@ -121,9 +210,9 @@ def render(doc: dict) -> str:
         f'<p class="prio prio-{esc(tier_class)}">Action priority: {esc(tier)}</p></div>'
     )
     out.append(
-        f'<p class=meta>{esc(summary.get("pass", 0))} pass · {esc(summary.get("warn", 0))} warn · '
-        f'{esc(summary.get("fail", 0))} fail · {esc(summary.get("skip", 0))} skip '
-        f'({esc(summary.get("total", len(results)))} total)</p>'
+        f'<p class=meta>{esc(summary["pass"])} pass · {esc(summary["warn"])} warn · '
+        f'{esc(summary["fail"])} fail · {esc(summary["skip"])} skip '
+        f'({esc(summary["total"])} total)</p>'
     )
 
     out.append("<h2>Top risks to address</h2>")
@@ -141,17 +230,21 @@ def render(doc: dict) -> str:
             )
         out.append("</tbody></table>")
     else:
-        out.append("<p><em>No warnings or failures.</em></p>")
+        if summary["warn"] + summary["fail"]:
+            out.append("<p><em>No ranked risks were included. Review the warnings and failures below.</em></p>")
+        else:
+            out.append("<p><em>No warnings or failures.</em></p>")
 
     out.append("<h2>All checks</h2>")
     out.append("<table><thead><tr><th>status</th><th>id</th><th>finding</th></tr></thead><tbody>")
     for r in results:
         st = r.get("status", "skip")
         status_class = st if st in STATUS_LABEL else "unknown"
+        hint = f'<div class="hint">{esc(r["hint"])}</div>' if r.get("hint") else ""
         out.append(
             f'<tr><td class="s-{esc(status_class)}">{esc(STATUS_LABEL.get(st, st))}</td>'
             f'<td><code>{esc(r.get("id", ""))}</code></td>'
-            f'<td>{esc(r.get("label", ""))}</td></tr>'
+            f'<td>{esc(r.get("label", ""))}{hint}</td></tr>'
         )
     out.append("</tbody></table>")
 
@@ -164,26 +257,93 @@ def render(doc: dict) -> str:
     return "".join(out)
 
 
+def _unique_object(pairs: list[tuple]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("input contains a duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value: str) -> None:
+    raise ValueError("input contains a non-finite JSON number")
+
+
+def _parse_number(value: str):
+    # Bound numeric conversion on older macOS Python versions that do not have
+    # the newer interpreter limit on integer-string conversion.
+    if len(value) > 128:
+        raise ValueError("input contains an excessively long JSON number")
+    if any(char in value for char in ".eE"):
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("input contains a non-finite JSON number")
+        return number
+    return int(value)
+
+
+def read_document(stream) -> object:
+    raw = stream.read(MAX_INPUT_BYTES + 1)
+    if len(raw) > MAX_INPUT_BYTES:
+        raise ValueError(f"input exceeds {MAX_INPUT_BYTES} bytes")
+    return json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object,
+                      parse_constant=_reject_constant,
+                      parse_int=_parse_number, parse_float=_parse_number)
+
+
+def _clear_inherited_acl(fd: int) -> None:
+    if sys.platform != "darwin":
+        return
+    # macOS mode 0600 does not restrict an inherited allow ACL. Clear the ACL
+    # on the newly created file before writing content. Passing the open FD to
+    # the stock utility avoids reopening a pathname that could be replaced.
+    try:
+        subprocess.run(["/bin/chmod", "-N", f"/dev/fd/{fd}"], pass_fds=(fd,),
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.PIPE, check=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise OSError("could not remove inherited ACL from the new output file") from error
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) > 2:
-        print("usage: render_report.py [posture.json]  (or pipe JSON on stdin)", file=sys.stderr)
-        return 2
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("input", nargs="?", help="posture JSON file (default: stdin)")
+    parser.add_argument("--output", metavar="FILE",
+                        help="create a private HTML file; refuse an existing path")
+    args = parser.parse_args(argv[1:])
     try:
-        if len(argv) == 2:
-            with open(argv[1], encoding="utf-8") as source:
-                raw = source.read()
+        if args.input:
+            with open(args.input, "rb") as stream:
+                doc = read_document(stream)
         else:
-            raw = sys.stdin.read()
-        doc = json.loads(raw)
+            doc = read_document(sys.stdin.buffer)
+        output = render(doc)
     except (OSError, ValueError, RecursionError) as e:
-        print(f"render_report: could not read/parse input: {e}", file=sys.stderr)
-        return 2
-    try:
-        report = render(doc)
-    except ValueError as e:
         print(f"render_report: invalid input: {e}", file=sys.stderr)
         return 2
-    sys.stdout.write(report)
+    try:
+        if args.output:
+            # O_EXCL also refuses symlinks (including dangling links). Validate
+            # before creating anything. Never open an existing target for write.
+            fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                _clear_inherited_acl(stream.fileno())
+                stream.write(output)
+        else:
+            sys.stdout.buffer.write(output.encode("utf-8"))
+            sys.stdout.buffer.flush()
+    except BrokenPipeError:
+        # Prevent a second flush and an interpreter traceback on shutdown when
+        # a consumer closes the pipe early (for example, piping into head).
+        with open(os.devnull, "wb") as sink:
+            os.dup2(sink.fileno(), sys.stdout.fileno())
+        print("render_report: output pipe closed before the report was written", file=sys.stderr)
+        return 2
+    except (OSError, UnicodeError) as e:
+        print(f"render_report: could not write report: {e}", file=sys.stderr)
+        return 2
     return 0
 
 

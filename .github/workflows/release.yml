@@ -1,122 +1,156 @@
 name: Release
 
-# Build, sign, and attach release assets when a v* tag is pushed.
-#
-# Signing uses Sigstore-cosign keyless OIDC — the signature is bound to the
-# workflow's OIDC identity (this repo, this ref, this commit), and anyone can
-# verify the asset came from this release workflow without trusting a stored
-# private key. Pairs with (does not replace) the SSH-signed git tag.
-#
-# A workflow_dispatch trigger is included so existing releases can be
-# back-filled with signed assets (call the workflow with the tag name, e.g.
-# v1.6.0). All actions are pinned to commit SHAs; Dependabot keeps them current.
-
+# Validate the exact tag with a read-only token before the publisher receives
+# release-write or OIDC permissions. Publish only the tested commit.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to build + sign assets for (e.g. v1.6.0)'
+        description: 'Version tag (select this same tag in Run workflow)'
         required: true
         type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  release:
-    name: Build, sign, and attach release assets
-    runs-on: ubuntu-latest
+  validate:
+    name: Validate tagged source
+    runs-on: macos-latest
+    timeout-minutes: 20
     permissions:
-      # Needed to upload assets to the release.
-      contents: write
-      # Needed for cosign keyless OIDC signing AND attest-build-provenance.
-      id-token: write
-      # Needed for actions/attest-build-provenance to publish the in-toto
-      # attestation to GitHub's attestation API alongside Rekor.
-      attestations: write
+      contents: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      sha: ${{ steps.commit.outputs.sha }}
     steps:
-      - name: Resolve tag
+      - name: Resolve version tag
         id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            [[ "$GITHUB_REF" == refs/tags/* ]]
             tag="${GITHUB_REF#refs/tags/}"
           else
-            tag="${{ inputs.tag }}"
+            tag="$INPUT_TAG"
           fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Resolved tag: $tag"
+          # Treat input as data. Reject branch names, options, path separators,
+          # newlines and shell syntax before using it as a Git ref or filename.
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*$ ]]; then
+            printf 'Invalid version tag: %s\n' "$tag" >&2
+            exit 1
+          fi
+          # Keyless provenance uses the workflow event ref and SHA. A manual
+          # run must select the same tag, not run main against another tag.
+          if [[ "$GITHUB_REF" != "refs/tags/$tag" ]]; then
+            printf 'Run this workflow at the selected version tag.\n' >&2
+            exit 1
+          fi
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Check out tagged code
+      - name: Check out exact tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.tag.outputs.tag }}
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Build release tarball
+      - name: Record tested commit
+        id: commit
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          [[ "$sha" == "$GITHUB_SHA" ]]
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Install test tools
+        run: brew install bats-core shellcheck shfmt
+
+      - name: Validate before release
+        run: ./scripts/test.sh
+
+  release:
+    name: Build, sign, and attach release assets
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      SOURCE_SHA: ${{ needs.validate.outputs.sha }}
+    steps:
+      - name: Check out tested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build release tarball from committed files
         id: build
         run: |
           set -euo pipefail
-          tag="${{ steps.tag.outputs.tag }}"
-          dist="mac-posture-audit-${tag}"
-          mkdir -p "$dist"
-          # Ship the canonical user-facing layout: script + docs + companion tool.
-          cp mac-posture-audit.sh README.md LICENSE SECURITY.md CHANGELOG.md "$dist/"
-          [ -d docs ] && cp -R docs "$dist/"
-          [ -d tools ] && cp -R tools "$dist/"
-          [ -d scripts ] && cp -R scripts "$dist/"
-          tar -czf "${dist}.tar.gz" "$dist"
-          shasum -a 256 "${dist}.tar.gz" | tee "${dist}.tar.gz.sha256"
-          echo "asset=${dist}.tar.gz" >> "$GITHUB_OUTPUT"
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          dist="mac-posture-audit-${RELEASE_TAG}"
+          asset="${dist}.tar.gz"
+          # git archive excludes untracked files and gives reproducible metadata.
+          # This job does not execute scripts from the release source.
+          git archive --format=tar --prefix="${dist}/" "$SOURCE_SHA" \
+            mac-posture-audit.sh README.md LICENSE SECURITY.md CHANGELOG.md \
+            docs tools scripts/check-read-only.sh | gzip -n > "$asset"
+          shasum -a 256 "$asset" > "${asset}.sha256"
+          printf 'asset=%s\n' "$asset" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      - name: Sign tarball (sigstore keyless)
-        run: |
-          set -euo pipefail
-          asset="${{ steps.build.outputs.asset }}"
-          # cosign v3 deprecated --output-signature / --output-certificate in
-          # favor of --bundle, which writes a single JSON .sigstore bundle
-          # containing the signature, the Fulcio certificate, and the Rekor
-          # transparency log entry. Scorecard's signed-releases check matches
-          # the .sigstore extension, so this satisfies it with one file.
-          cosign sign-blob --yes \
-            --bundle "${asset}.sigstore" \
-            "${asset}"
-          echo "signed: ${asset}"
-          echo "bundle:  ${asset}.sigstore"
+      - name: Sign tarball
+        env:
+          ASSET: ${{ steps.build.outputs.asset }}
+        run: cosign sign-blob --yes --bundle "${ASSET}.sigstore" "$ASSET"
 
       - name: Generate SLSA build provenance
         id: attest
-        # Generates an in-toto SLSA-provenance attestation for the tarball and
-        # publishes it to GitHub's attestation API (and Sigstore's Rekor log).
-        # Pairs with the cosign signature above to satisfy BOTH legs of
-        # Scorecard's Signed-Releases check (signature + provenance) — the
-        # second leg is what was missing for the 8/10 -> 10/10 jump.
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: ${{ steps.build.outputs.asset }}
 
-      - name: Stage attestation under a predictable name
-        run: |
-          set -euo pipefail
-          asset="${{ steps.build.outputs.asset }}"
-          cp "${{ steps.attest.outputs.bundle-path }}" "${asset}.intoto.jsonl"
-          ls -lh "${asset}".*
+      - name: Stage attestation
+        env:
+          ASSET: ${{ steps.build.outputs.asset }}
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "$BUNDLE_PATH" "${ASSET}.intoto.jsonl"
 
       - name: Upload assets to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSET: ${{ steps.build.outputs.asset }}
         run: |
           set -euo pipefail
-          tag="${{ steps.tag.outputs.tag }}"
-          asset="${{ steps.build.outputs.asset }}"
-          gh release upload "$tag" \
-            "${asset}" \
-            "${asset}.sha256" \
-            "${asset}.sigstore" \
-            "${asset}.intoto.jsonl" \
-            --clobber
+          # Verify the existing release still points to the tested commit. gh's
+          # tag ref API handles both lightweight and annotated tags below.
+          ref_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha')
+          ref_type=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.type')
+          while [[ "$ref_type" == tag ]]; do
+            ref_type=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${ref_sha}" --jq '.object.type')
+            ref_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${ref_sha}" --jq '.object.sha')
+          done
+          [[ "$ref_type" == commit && "$ref_sha" == "$SOURCE_SHA" ]]
+          # Existing assets are immutable. A rerun must not replace them.
+          gh release upload "$RELEASE_TAG" \
+            "$ASSET" "${ASSET}.sha256" "${ASSET}.sigstore" "${ASSET}.intoto.jsonl"

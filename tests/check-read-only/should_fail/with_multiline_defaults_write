@@ -1,0 +1,4 @@
+# Tripwire input only. Never run this file.
+exit 0
+defaults \
+  write com.example.never MutationFlag -bool true

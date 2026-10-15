@@ -94,3 +94,120 @@ PY
   [[ "$output" == *"supply.posture fail"* ]]
   [[ "$output" == *"system.sip.enabled pass"* ]]
 }
+
+@test "recognized integrity states attach verified booleans and FileVault enums" {
+  local enabled state fixture
+  for enabled in true false; do
+    reset_state
+    if $enabled; then state=on; fixture=enabled; else state=off; fixture=disabled; fi
+    mock_cli csrutil "csrutil/$fixture.txt"
+    mock_cli spctl "spctl/$fixture.txt"
+    mock_cli fdesetup "fdesetup/$state.txt"
+    section_01_system_integrity
+    python3 - "$(_build_json_document)" "$enabled" "$state" <<'PY'
+import json, sys
+rows = {row['id']: row for row in json.loads(sys.argv[1])['results']}
+for ident, probe in [('system.sip.enabled', 'csrutil status'), ('system.gatekeeper.enabled', 'spctl --status')]:
+    assert rows[ident]['evidence'] == {'probe': probe, 'enabled': sys.argv[2] == 'true'}, rows[ident]
+assert rows['system.filevault.on']['evidence'] == {'probe': 'fdesetup status', 'state': sys.argv[3]}
+PY
+  done
+}
+
+@test "failed or unrecognized integrity probes do not attach a false enabled boolean" {
+  local mode
+  for mode in failure unknown; do
+    reset_state
+    if [[ "$mode" == failure ]]; then
+      mock_cli csrutil csrutil/enabled.txt 1
+      mock_cli spctl spctl/enabled.txt 1
+      mock_cli fdesetup fdesetup/on.txt 1
+    else
+      mock_cli_script csrutil $'#!/bin/bash\nprintf "Custom Configuration\\n"'
+      mock_cli_script spctl $'#!/bin/bash\nprintf "unsupported output\\n"'
+      mock_cli_script fdesetup $'#!/bin/bash\nprintf "unsupported output\\n"'
+    fi
+    section_01_system_integrity
+    python3 - "$(_build_json_document)" <<'PY'
+import json, sys
+rows = {row['id']: row for row in json.loads(sys.argv[1])['results']}
+for ident in ['system.sip.enabled', 'system.gatekeeper.enabled', 'system.filevault.on']:
+    row = rows[ident]
+    assert row['status'] == 'skip', row
+    assert row['evidence']['state'] == 'unknown', row
+    assert 'enabled' not in row['evidence'], row
+PY
+  done
+}
+
+@test "partial supply evidence identifies known gaps without claiming effective policy" {
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME"
+  unset NPM_CONFIG_USERCONFIG
+  _tool_path() { case "$1" in npm | yarn | pnpm) return 0 ;; *) return 1 ;; esac; }
+  command() { return 1; }
+  _check_supply_direnv() { :; }
+  _check_supply_pip_extra_index() { :; }
+  _check_supply_uv_config() { :; }
+  printf 'ignore-scripts=false\n' >"$HOME/.npmrc"
+  printf 'enableScripts: ${DYNAMIC_POLICY}\n' >"$HOME/.yarnrc.yml"
+  section_13_supply_chain
+  python3 - "$(_build_json_document)" <<'PY'
+import json, sys
+rows = {row['id']: row for row in json.loads(sys.argv[1])['results']}
+row = rows['supply.posture']
+assert row['status'] == 'fail', row
+assert row['evidence'] == {
+    'managers_running_scripts': 2,
+    'policy_scope': 'user_config',
+    'policy_unknown': True,
+    'effective_policy_verified': False,
+    'scanner_present': False,
+}, row
+PY
+}
+
+@test "zero known supply gaps still carry unknown scope when policy is unreadable" {
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME"
+  unset NPM_CONFIG_USERCONFIG
+  _tool_path() { case "$1" in npm | yarn | pnpm | socket) return 0 ;; *) return 1 ;; esac; }
+  command() { return 1; }
+  _check_supply_direnv() { :; }
+  _check_supply_pip_extra_index() { :; }
+  _check_supply_uv_config() { :; }
+  section_13_supply_chain
+  python3 - "$(_build_json_document)" <<'PY'
+import json, sys
+row = next(row for row in json.loads(sys.argv[1])['results'] if row['id'] == 'supply.posture')
+assert row['status'] == 'skip', row
+assert row['evidence'] == {
+    'managers_running_scripts': 0,
+    'policy_scope': 'user_config',
+    'policy_unknown': True,
+    'effective_policy_verified': False,
+    'scanner_present': True,
+}, row
+PY
+}
+
+@test "mixed encrypted and unclassified SSH keys emit unknown evidence" {
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME/.ssh"
+  : >"$HOME/.ssh/id_ed25519"
+  : >"$HOME/.ssh/id_rsa"
+  mock_cli_script ssh-keygen '#!/bin/bash
+case "$*" in
+  *id_rsa*) echo "incorrect passphrase supplied to decrypt private key" >&2 ;;
+  *) echo "invalid format" >&2 ;;
+esac
+exit 255'
+  export SSH_AUTH_SOCK="$HOME/secretive-agent.sock"
+  section_11_ssh
+  python3 - "$(_build_json_document)" <<'PY'
+import json, sys
+row = next(row for row in json.loads(sys.argv[1])['results'] if row['id'] == 'ssh.posture')
+assert row['status'] == 'skip', row
+assert row['evidence'] == {'key_state': 'unknown', 'external_agent': True}, row
+PY
+}

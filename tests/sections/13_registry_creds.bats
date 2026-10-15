@@ -103,3 +103,61 @@ set_status() { STATUS_BY_ID="$STATUS_BY_ID $1=$2 "; }
   _check_supply_registry_credentials
   assert_recorded pass "No package-registry credentials detected on disk"
 }
+
+# Run the whole section with synthetic files and no external package tools.
+# This exercises the duplicate-ID guard and the downstream composite together.
+isolate_registry_section() {
+  load_script
+  isolate_home
+  mkdir -p "$HOME/.cargo"
+  _tool_path() { return 1; }
+  mock_cli_script git '#!/bin/bash
+exit 0'
+  NETWORK=false
+  REDACT=true
+}
+
+@test "legacy and modern Cargo credential files emit one row without leaking contents or paths" {
+  isolate_registry_section
+  printf 'token = "CARGO_FIXTURE_SECRET_MODERN"\n' >"$HOME/.cargo/credentials.toml"
+  printf 'token = "CARGO_FIXTURE_SECRET_LEGACY"\n' >"$HOME/.cargo/credentials"
+  chmod 600 "$HOME/.cargo/credentials.toml" "$HOME/.cargo/credentials"
+
+  section_13_supply_chain
+
+  [ "$(_status_of supply.cargo.creds)" = warn ]
+  assert_recorded warn 'cargo credential file(s) on disk (2; owner-only POSIX modes)'
+  [ "$(printf '%s\n' "${ROW_ID[@]}" | grep -c '^supply.cargo.creds$')" -eq 1 ]
+  local all="${RESULTS_PASS[*]:-} ${RESULTS_WARN[*]:-} ${RESULTS_FAIL[*]:-} ${RESULTS_SKIP[*]:-}"
+  [[ "$all" != *CARGO_FIXTURE_SECRET* ]]
+  [[ "$all" != *"$HOME"* ]]
+  [[ "$all" != *'.cargo/credentials'* ]]
+}
+
+@test "either Cargo credential file with loose permissions makes the single row fail" {
+  isolate_registry_section
+  : >"$HOME/.cargo/credentials.toml"
+  : >"$HOME/.cargo/credentials"
+  chmod 600 "$HOME/.cargo/credentials.toml"
+  chmod 644 "$HOME/.cargo/credentials"
+
+  section_13_supply_chain
+
+  [ "$(_status_of supply.cargo.creds)" = fail ]
+  [ "$(printf '%s\n' "${ROW_ID[@]}" | grep -c '^supply.cargo.creds$')" -eq 1 ]
+  assert_recorded fail 'cargo credential file(s) have loose permissions (2 on disk)'
+  [ "$(_status_of supply.registry_credentials.present)" = warn ]
+}
+
+@test "unreadable Cargo permission metadata remains a warning instead of a false tight-mode claim" {
+  isolate_registry_section
+  : >"$HOME/.cargo/credentials.toml"
+  mock_cli_script stat '#!/bin/bash
+exit 1'
+
+  section_13_supply_chain
+
+  [ "$(_status_of supply.cargo.creds)" = warn ]
+  assert_recorded warn 'cargo credential file(s) present; permissions could not be verified'
+  [ "$(_status_of supply.registry_credentials.present)" = warn ]
+}

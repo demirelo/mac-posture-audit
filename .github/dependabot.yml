@@ -1,12 +1,5 @@
-# Dependabot config — keeps GitHub Actions pinned-by-SHA references current.
-# This repo has no language package manifests (it's a single-file shell
-# script + opt-in Python companion with stdlib only), so only the
-# github-actions ecosystem is enrolled here.
-#
-# Updates are grouped into a single monthly PR: with every workflow SHA-pinned
-# and Scorecard enforcing that, individual weekly bumps produce a wall of
-# all-bot PRs that reads as "unmaintained" to a visitor. One batched PR per
-# month keeps the actions current without the noise.
+# Keep action SHAs, the fuzzing container digest, and hashed Python fuzzing
+# dependencies current. The audit and report renderer need no runtime packages.
 
 version: 2
 updates:
@@ -14,6 +7,11 @@ updates:
     directory: "/"
     schedule:
       interval: "monthly"
+    groups:
+      # Keep related action steps, including CodeQL init/analyze, in one PR.
+      github-actions:
+        patterns:
+          - "*"
     commit-message:
       prefix: "chore"
       include: "scope"
@@ -21,7 +19,23 @@ updates:
       - "dependencies"
       - "github-actions"
     open-pull-requests-limit: 5
-    groups:
-      github-actions:
-        patterns:
-          - "*"
+  - package-ecosystem: "docker"
+    directory: "/.clusterfuzzlite"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "pip"
+    directory: "/.clusterfuzzlite"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 5

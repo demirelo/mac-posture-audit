@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # ─────────────────────────────────────────────────────────────────────────────
 # macOS Posture Audit
 #
@@ -10,7 +10,7 @@
 #
 # Usage:
 #   ./mac-posture-audit.sh
-#   sudo ./mac-posture-audit.sh          # fuller audit; still read-only
+#   ./mac-posture-audit.sh              # run as your normal user, not root
 #   ./mac-posture-audit.sh --quick       # skip checks that require sudo
 #   ./mac-posture-audit.sh --network     # opt in to live network probes
 #   ./mac-posture-audit.sh --json        # machine-readable output
@@ -30,7 +30,7 @@
 # shellcheck disable=SC2088
 set -uo pipefail
 
-SCRIPT_VERSION="1.7.0"
+SCRIPT_VERSION="1.7.0-dev"
 
 # ── State ───────────────────────────────────────────────────────────────────
 # Every array below uses plain `X=()` assignment rather than `declare -a X`:
@@ -139,13 +139,7 @@ parse_args() {
       continue
     fi
     if $expect_top; then
-      case "$arg" in
-      '' | *[!0-9]*)
-        echo "--top requires a non-negative integer"
-        exit 2
-        ;;
-      esac
-      TOP_N="$arg"
+      _parse_top "$arg"
       expect_top=false
       continue
     fi
@@ -173,13 +167,7 @@ parse_args() {
     --top) expect_top=true ;;
     --top=*)
       arg="${arg#--top=}"
-      case "$arg" in
-      '' | *[!0-9]*)
-        echo "--top requires a non-negative integer"
-        exit 2
-        ;;
-      esac
-      TOP_N="$arg"
+      _parse_top "$arg"
       ;;
     --explain) expect_explain=true ;;
     --explain=*) run_explain "${arg#--explain=}" ;;
@@ -265,7 +253,7 @@ Flags (combinable):
                           mac-posture-audit summary version=… profile=… …
                           For shell scripts that just need pass/warn/fail counts.
   --top N                 Cap the "Top risks to address" list to N items
-                          (default 7). --top 0 hides the list but still prints
+                          (0–1000; default 7). --top 0 hides the list but still prints
                           the Executive Verdict and Action priority.
   --explain ID            Print the threat rationale and per-profile severity
                           for one check id (e.g. chain.fake_interview) and exit
@@ -313,10 +301,14 @@ USAGE
     echo "--report requires a format (md)"
     exit 2
   fi
+  if $expect_top; then
+    printf '%s\n' '--top requires an integer from 0 to 1000' >&2
+    exit 2
+  fi
 
   # --diff implies json collection; we need rows in JSON_ROWS to compare.
   if [[ -n "$DIFF_PATH" ]]; then
-    if [[ ! -r "$DIFF_PATH" ]]; then
+    if [[ ! -f "$DIFF_PATH" || ! -r "$DIFF_PATH" ]]; then
       echo "--diff: cannot read $DIFF_PATH"
       exit 2
     fi
@@ -328,21 +320,64 @@ USAGE
   [[ -n "$REPORT_FORMAT" ]] && MODE="json"
   # --snapshot stores a redacted JSON (safe-to-keep history); it implies --redact.
   $SNAPSHOT && REDACT=true
+  if [[ -n "$DIFF_PATH" ]] && { $SNAPSHOT || [[ -n "$REPORT_FORMAT" ]]; }; then
+    printf '%s\n' '--diff cannot be combined with --snapshot or --report' >&2
+    exit 2
+  fi
+  return 0
+}
+
+_parse_top() {
+  local value="$1"
+  case "$value" in
+  '' | *[!0-9]*)
+    printf '%s\n' '--top requires an integer from 0 to 1000' >&2
+    exit 2
+    ;;
+  esac
+  while [[ ${#value} -gt 1 && "$value" == 0* ]]; do value="${value#0}"; done
+  if [[ ${#value} -gt 4 ]] || [[ "$value" -gt 1000 ]]; then
+    printf '%s\n' '--top requires an integer from 0 to 1000' >&2
+    exit 2
+  fi
+  TOP_N="$value"
+}
+
+# Locate optional tools without running them. The executable search path used
+# by probes is fixed in main; inventory alone can inspect the original PATH.
+_tool_path() {
+  PATH="${AUDIT_INVENTORY_PATH:-$PATH}" type -P -- "$1"
 }
 
 detect_runtime() {
-  # When launched via sudo, keep auditing the invoking user's home directory.
-  # Otherwise user-level checks would inspect /var/root instead of the real account.
-  if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]]; then
-    SUDO_USER_HOME=$(dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory 2>/dev/null | sed 's/^NFSHomeDirectory:[[:space:]]*//' | head -1)
-    [[ -d "$SUDO_USER_HOME" ]] && HOME="$SUDO_USER_HOME"
+  local detected version_pattern='^[0-9]{1,4}(\.[0-9]{1,4}){1,2}$'
+  ARCH=unknown
+  if detected=$(uname -m 2>/dev/null); then
+    case "$detected" in arm64 | x86_64 | i386) ARCH="$detected" ;; esac
   fi
-
-  ARCH=$(uname -m)
   IS_APPLE_SILICON=false
   [[ "$ARCH" == "arm64" ]] && IS_APPLE_SILICON=true
-  MACOS_VER=$(sw_vers -productVersion 2>/dev/null || echo "unknown")
+  # Rosetta reports an x86_64 process on Apple silicon. Keep ARCH as the
+  # process architecture, but select boot-security checks by hardware.
+  if [[ "$ARCH" == "x86_64" ]] && detected=$(sysctl -n hw.optional.arm64 2>/dev/null) && [[ "$detected" == 1 ]]; then
+    IS_APPLE_SILICON=true
+  fi
+  MACOS_VER=unknown
+  if detected=$(sw_vers -productVersion 2>/dev/null) && [[ "$detected" =~ $version_pattern ]]; then
+    MACOS_VER="$detected"
+  fi
+}
 
+# Compare numeric major/minor versions, including the 15 -> 26 numbering jump.
+# Unknown or malformed versions cannot select a legacy permission backend.
+_macos_at_least() {
+  local version="${MACOS_VER:-unknown}" major minor rest
+  local version_pattern='^[0-9]{1,4}(\.[0-9]{1,4}){1,2}$'
+  [[ "$version" =~ $version_pattern ]] || return 1
+  major="${version%%.*}"
+  rest="${version#*.}"
+  minor="${rest%%.*}"
+  ((10#$major > $1 || (10#$major == $1 && 10#$minor >= $2)))
 }
 
 init_colors() {
@@ -673,7 +708,7 @@ _effort_of() {
 # does not break older scanners.
 load_exposure_catalog() {
   [[ -z "${EXPOSURE_CATALOG_PATH:-}" ]] && return 0
-  if [[ ! -r "$EXPOSURE_CATALOG_PATH" ]]; then
+  if [[ ! -f "$EXPOSURE_CATALOG_PATH" || ! -r "$EXPOSURE_CATALOG_PATH" ]]; then
     printf 'mac-posture-audit: cannot read --exposure-catalog %s\n' "$EXPOSURE_CATALOG_PATH" >&2
     exit 2
   fi
@@ -737,7 +772,7 @@ _catalog_status_for() {
 # control-character set so any defaults/plutil/etc. value pulled into a label
 # or hint round-trips through json.loads().
 _json_escape() {
-  local s="$1"
+  local s="$1" i ch escaped
   s=${s//\\/\\\\}
   s=${s//\"/\\\"}
   s=${s//$'\n'/\\n}
@@ -745,23 +780,32 @@ _json_escape() {
   s=${s//$'\t'/\\t}
   s=${s//$'\b'/\\b}
   s=${s//$'\f'/\\f}
-  # Bash variables cannot contain NUL; escape every other JSON control byte.
-  # Keep the conventional short escapes above for backwards-compatible output.
-  # Common escapes leave ordinary strings free of these 26 control bytes.
-  if [[ "$s" != *[$'\001\002\003\004\005\006\007\013\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037']* ]]; then
-    printf '%s' "$s"
-    return
-  fi
-  local code byte escaped
-  for ((code = 1; code < 32; code++)); do
-    case "$code" in
-    8 | 9 | 10 | 12 | 13) continue ;;
-    esac
-    printf -v byte '\\%03o' "$code"
-    printf -v byte '%b' "$byte"
-    printf -v escaped '\\u%04x' "$code"
-    s=${s//"$byte"/"$escaped"}
+  for ((i = 1; i < 32; i++)); do
+    case "$i" in 8 | 9 | 10 | 12 | 13) continue ;; esac
+    printf -v ch '%03o' "$i"
+    printf -v ch '%b' "\\$ch"
+    printf -v escaped '\\u%04x' "$i"
+    s=${s//"$ch"/"$escaped"}
   done
+  printf '%s' "$s"
+}
+
+# Display untrusted probe strings without terminal control sequences. JSON
+# retains the original data and uses JSON escaping instead.
+_terminal_text() {
+  local s="$1" i ch escaped
+  for ((i = 1; i < 32; i++)); do
+    printf -v ch '%03o' "$i"
+    printf -v ch '%b' "\\$ch"
+    case "$i" in
+    9) escaped='\t' ;;
+    10) escaped='\n' ;;
+    13) escaped='\r' ;;
+    *) printf -v escaped '\\u%04x' "$i" ;;
+    esac
+    s=${s//"$ch"/"$escaped"}
+  done
+  s=${s//$'\177'/\\u007f}
   printf '%s' "$s"
 }
 
@@ -824,8 +868,8 @@ _status_of() {
 # regardless of --redact, so anything host-identifying would defeat it.
 #
 # The staging buffer is the inner body of a JSON object (`"k":v,"k2":v2`);
-# _build_json_document wraps it in braces. Kept flat (scalar values only) so the
-# stock-shell --diff parser, which splits rows on `},{`, is never confused.
+# _build_json_document wraps it in braces. Current evidence uses scalar values;
+# the stock-shell --diff parser also handles nested JSON fields.
 _EV=""
 
 ev_reset() { _EV=""; }
@@ -857,6 +901,15 @@ _record() {
   # id is optional and identifies a logical check uniquely within a single run.
   # Stable across runs so external consumers can diff successive scans by id.
   local status="$1" label="$2" hint="${3:-}" id="${4:-}"
+  if [[ "${REDACT:-false}" == true && -n "${HOME:-}" ]]; then
+    # Keep the replacement tilde literal, including on stock Bash 3.2.
+    label="${label//"$HOME"/~}"
+    hint="${hint//"$HOME"/~}"
+  fi
+  if [[ "$MODE" != "json" ]]; then
+    label=$(_terminal_text "$label")
+    hint=$(_terminal_text "$hint")
+  fi
 
   # Consume and clear the evidence staging buffer up front, so exactly one row
   # carries it and it can never leak into a later row regardless of which
@@ -1092,12 +1145,15 @@ _tcc_query_approved() {
   # modern auth_value schema and the older allowed schema. Returns non-zero if
   # the database cannot be read or the schema is not recognised.
   local db="$1" use_sudo="$2" cols query
+  # Apple removed direct TCC database access in macOS 27. Unknown versions
+  # must not fall back to a legacy read or an attempted privilege increase.
+  if ! _macos_at_least 10 0 || _macos_at_least 27 0; then return 1; fi
   if [[ "$use_sudo" == "true" ]]; then
     sudo -n test -r "$db" 2>/dev/null || return 1
-    cols=$(sudo -n sqlite3 -readonly "$db" "PRAGMA table_info(access);" 2>/dev/null) || return 1
+    cols=$(sudo -n sqlite3 -readonly -init /dev/null "$db" "PRAGMA table_info(access);" 2>/dev/null) || return 1
   else
     [[ -r "$db" ]] || return 1
-    cols=$(sqlite3 -readonly "$db" "PRAGMA table_info(access);" 2>/dev/null) || return 1
+    cols=$(sqlite3 -readonly -init /dev/null "$db" "PRAGMA table_info(access);" 2>/dev/null) || return 1
   fi
 
   if echo "$cols" | grep -q '|auth_value|'; then
@@ -1109,9 +1165,9 @@ _tcc_query_approved() {
   fi
 
   if [[ "$use_sudo" == "true" ]]; then
-    sudo -n sqlite3 -readonly "$db" "$query" 2>/dev/null || return 1
+    sudo -n sqlite3 -readonly -init /dev/null "$db" "$query" 2>/dev/null || return 1
   else
-    sqlite3 -readonly "$db" "$query" 2>/dev/null || return 1
+    sqlite3 -readonly -init /dev/null "$db" "$query" 2>/dev/null || return 1
   fi
 }
 
@@ -1189,8 +1245,12 @@ print_header() {
   # ── Header ──────────────────────────────────────────────────────────────────
   if [[ "$MODE" != "json" ]]; then
     printf "%smacOS Posture Audit%s\n" "$BOLD" "$NC"
-    printf "%sRead-only. No changes will be made.%s\n" "$DIM" "$NC"
-    printf "%sHost: %s · macOS %s · arch %s%s\n" "$DIM" "$(redact host "$(hostname)")" "$MACOS_VER" "$ARCH" "$NC"
+    if ${SNAPSHOT:-false}; then
+      printf '%sRead-only probes; a private report snapshot will be saved.%s\n' "$DIM" "$NC"
+    else
+      printf "%sRead-only. No changes will be made.%s\n" "$DIM" "$NC"
+    fi
+    printf "%sHost: %s · macOS %s · arch %s%s\n" "$DIM" "$(_terminal_text "$(redact host "$(hostname)")")" "$(_terminal_text "$MACOS_VER")" "$(_terminal_text "$ARCH")" "$NC"
     $QUICK && printf "%sQuick mode: skipping sudo-required checks%s\n" "$DIM" "$NC"
     ! $NETWORK && printf "%sOffline mode: external network probes disabled (use --network to enable)%s\n" "$DIM" "$NC"
     $REDACT && printf "%sRedaction mode: hostname / email / usernames / IPs / paths masked%s\n" "$DIM" "$NC"
@@ -1208,56 +1268,65 @@ section_01_system_integrity() {
   # ═════════════════════════════════════════════════════════════════════════════
   section "01 · System Integrity (Disk & Boot)"
 
-  if csrutil status 2>/dev/null | grep -qi "enabled"; then
-    ev probe "csrutil status"
+  local sip_output gatekeeper_output
+  sip_output=$(csrutil status 2>/dev/null) || sip_output=""
+  ev probe "csrutil status"
+  if printf '%s\n' "$sip_output" | grep -qiE '^System Integrity Protection status: enabled\.[[:space:]]*$'; then
     ev_raw enabled true
     pass "SIP (System Integrity Protection) is enabled" "system.sip.enabled"
-  else
-    ev probe "csrutil status"
+  elif printf '%s\n' "$sip_output" | grep -qiE '^System Integrity Protection status: disabled\.[[:space:]]*$'; then
     ev_raw enabled false
     fail "SIP is disabled" "Re-enable from Recovery Mode: csrutil enable" "system.sip.enabled"
+  else
+    ev state unknown
+    skip "SIP state could not be verified" "Review csrutil status manually; custom, unreadable, or unexpected output is not a verified enabled state." "system.sip.enabled"
   fi
 
-  if spctl --status 2>/dev/null | grep -qi "assessments enabled"; then
-    ev probe "spctl --status"
+  gatekeeper_output=$(spctl --status 2>/dev/null) || gatekeeper_output=""
+  ev probe "spctl --status"
+  if printf '%s\n' "$gatekeeper_output" | grep -qiE '^assessments enabled[[:space:]]*$'; then
     ev_raw enabled true
     pass "Gatekeeper is enabled" "system.gatekeeper.enabled"
-  else
-    ev probe "spctl --status"
+  elif printf '%s\n' "$gatekeeper_output" | grep -qiE '^assessments disabled[[:space:]]*$'; then
     ev_raw enabled false
     fail "Gatekeeper is disabled" "Run: sudo spctl --master-enable" "system.gatekeeper.enabled"
+  else
+    ev state unknown
+    skip "Gatekeeper state could not be verified" "Review spctl --status manually." "system.gatekeeper.enabled"
   fi
 
-  FV_STATUS=$(fdesetup status 2>/dev/null || echo "unknown")
-  if echo "$FV_STATUS" | grep -q "FileVault is On"; then
-    ev probe "fdesetup status"
+  FV_STATUS=$(fdesetup status 2>/dev/null) || FV_STATUS=""
+  ev probe "fdesetup status"
+  if printf '%s\n' "$FV_STATUS" | grep -qE '^FileVault is On\.[[:space:]]*$'; then
     ev state on
     pass "FileVault is on (full-disk encryption active)" "system.filevault.on"
-  elif echo "$FV_STATUS" | grep -q "Off"; then
-    ev probe "fdesetup status"
+  elif printf '%s\n' "$FV_STATUS" | grep -qE '^FileVault is Off\.[[:space:]]*$'; then
     ev state off
     fail "FileVault is OFF" "Enable: System Settings → Privacy & Security → FileVault → Turn On" "system.filevault.on"
   else
-    ev probe "fdesetup status"
     ev state unknown
-    warn "FileVault state unknown" "Run manually: fdesetup status" "system.filevault.on"
+    skip "FileVault state unknown" "Run manually: fdesetup status" "system.filevault.on"
   fi
 
   if $IS_APPLE_SILICON; then
     if $QUICK; then
       skip "bputil boot security check (requires sudo)" "" "boot.secure.full"
     else
-      BPUTIL=$(sudo -n bputil -d 2>/dev/null || true)
+      BPUTIL=$(sudo -n bputil -d 2>/dev/null) || BPUTIL=""
       if [[ -n "$BPUTIL" ]]; then
         if echo "$BPUTIL" | grep -q "Security Mode:[[:space:]]*Full"; then
           pass "Apple Silicon Secure Boot: Full Security" "boot.secure.full"
-        else
+        elif echo "$BPUTIL" | grep -qE 'Security Mode:[[:space:]]*(Reduced|Permissive)([[:space:]]|$)'; then
           fail "Apple Silicon Secure Boot is not Full" "Boot to Recovery → Startup Security Utility → Full Security" "boot.secure.full"
+        else
+          skip "Apple Silicon boot security mode could not be parsed" "Review sudo bputil -d manually." "boot.secure.full"
         fi
         if echo "$BPUTIL" | grep -q "3rd Party Kexts Status:[[:space:]]*Disabled"; then
           pass "Third-party kernel extensions disabled" "boot.kexts.disabled"
-        else
+        elif echo "$BPUTIL" | grep -q '3rd Party Kexts Status:[[:space:]]*Enabled'; then
           warn "Third-party kexts allowed" "Disable unless you actively need them" "boot.kexts.disabled"
+        else
+          skip "Third-party kernel extension policy could not be parsed" "Review sudo bputil -d manually." "boot.kexts.disabled"
         fi
       else
         skip "bputil requires sudo" "Run manually: sudo bputil -d | grep 'Security Mode'" "boot.secure.full"
@@ -1727,7 +1796,7 @@ section_06_dns_outbound() {
   NEXTDNS_OK=false
   NEXTDNS_DOH=false
   if $NETWORK; then
-    NEXTDNS_TEST=$(curl -s --max-time 5 https://test.nextdns.io 2>/dev/null || echo "")
+    NEXTDNS_TEST=$(curl -q -sS --max-time 5 --proto '=https' https://test.nextdns.io 2>/dev/null || echo "")
     if echo "$NEXTDNS_TEST" | grep -q '"status":"ok"'; then
       NEXTDNS_OK=true
       echo "$NEXTDNS_TEST" | grep -q '"protocol":"DOH"' && NEXTDNS_DOH=true
@@ -2951,6 +3020,7 @@ section_11_ssh() {
   no_keys=$(_status_of "ssh.keys.none")
   unenc=$(_status_of "ssh.keys.unencrypted")
   enc=$(_status_of "ssh.keys.encrypted")
+  unknown=$(_status_of "ssh.keys.unknown")
   agent=$(_status_of "ssh.agent.1password")
   authsock=$(_status_of "ssh.authsock")
   ext_agent=false
@@ -2963,7 +3033,7 @@ section_11_ssh() {
     key_state=none
   elif [[ "$unenc" == "warn" || "$unenc" == "fail" ]]; then
     key_state=unencrypted
-  elif [[ "$enc" == "pass" ]]; then
+  elif [[ -z "$unknown" && "$enc" == "pass" ]]; then
     key_state=encrypted
   fi
   ev key_state "$key_state"
@@ -2984,14 +3054,18 @@ section_11_ssh() {
     fi
   elif [[ "$unenc" == "warn" || "$unenc" == "fail" ]] && $ext_agent; then
     warn "SSH posture: unencrypted keys still on disk despite external agent" "Add a passphrase to the on-disk key, or remove it entirely if the agent already holds the equivalent." "ssh.posture"
+  elif [[ -n "$unknown" ]]; then
+    skip "SSH posture: on-disk key protection could not be fully verified" "Inspect the unclassified private keys. An external agent does not establish whether the copies on disk are encrypted." "ssh.posture"
   elif [[ "$enc" == "pass" ]] && ! $ext_agent; then
     if [[ "$REDACT" == "true" ]]; then
       warn "SSH posture: encrypted keys but no external agent — passphrase entry on every use" "Optional improvement: use an external SSH agent so the key is unlocked once per session." "ssh.posture"
     else
       warn "SSH posture: encrypted keys but no external agent — passphrase entry on every use" "Optional improvement: 1Password SSH agent or Secretive (Secure Enclave) so the key is unlocked once per session." "ssh.posture"
     fi
-  else
+  elif [[ "$enc" == "pass" ]] && $ext_agent; then
     pass "SSH posture: encrypted keys with external agent" "ssh.posture"
+  else
+    skip "SSH posture: key protection could not be determined" "Review the individual SSH key checks before treating this posture as verified." "ssh.posture"
   fi
 
   # Restore caller's nullglob state (see top of section for rationale).
@@ -3198,44 +3272,81 @@ _check_supply_registry_credentials() {
   fi
 }
 
+_read_config_boolean() {
+  # Read only a literal boolean. Never run a package manager: Yarn can load
+  # project plugins/yarnPath and Corepack can download code on a config query.
+  local file="$1" key="$2" syntax="${3:-ini}"
+  [[ -e "$file" ]] || {
+    printf unset
+    return
+  }
+  [[ -f "$file" && -r "$file" ]] || {
+    printf unknown
+    return
+  }
+  LC_ALL=C awk -v key="$key" -v syntax="$syntax" '
+    BEGIN { value="unset"; section=0 }
+    /^[[:space:]]*[#;]/ { next }
+    {
+      line=$0
+      if (syntax == "yaml" && line ~ /^[[:space:]]/) next
+      sub(/^[[:space:]]*/, "", line)
+      if (syntax == "ini") {
+        if (line ~ /^\[/) { section=1; next }
+        if (section || line !~ ("^" key "[[:space:]]*=")) next
+        sub("^" key "[[:space:]]*=[[:space:]]*", "", line)
+      } else if (syntax == "yaml") {
+        if (line !~ ("^" key ":[[:space:]]+")) next
+        sub("^" key ":[[:space:]]+", "", line)
+      } else {
+        if (line !~ ("^(--)?" key "[[:space:]]+")) next
+        sub("^(--)?" key "[[:space:]]+", "", line)
+      }
+      sub(/[[:space:]]+[#;].*$/, "", line)
+      sub(/[[:space:]]*$/, "", line)
+      if (line == "true" || line == "false") value=line
+      else value="unknown"
+    }
+    END { printf "%s", value }
+  ' "$file" 2>/dev/null || printf unknown
+}
+
+_check_package_script_policy() {
+  local manager="$1" value="unset" other="unset" id="supply.$1.ignorescripts"
+  _tool_path "$manager" >/dev/null 2>&1 || return 0
+  case "$manager" in
+  npm | pnpm) value=$(_read_config_boolean "${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}" ignore-scripts) ;;
+  yarn)
+    value=$(_read_config_boolean "$HOME/.yarnrc" ignore-scripts yarn)
+    other=$(_read_config_boolean "$HOME/.yarnrc.yml" enableScripts yaml)
+    case "$other" in false) other=true ;; true) other=false ;; esac
+    ;;
+  esac
+  if [[ "$value" == unknown || "$other" == unknown ]] ||
+    { [[ "$value" != unset && "$other" != unset && "$value" != "$other" ]]; }; then
+    skip "$manager: script policy could not be determined from user config" "Inspect user and project config manually. The audit does not execute package managers." "$id"
+  elif [[ "$value" == true || "$other" == true ]]; then
+    pass "$manager: script blocking is set in user config (project and environment overrides unverified)" "$id"
+  elif [[ "$value" == false || "$other" == false ]]; then
+    warn "$manager: script blocking is disabled in user config" "Set ignore-scripts=true (npm/pnpm/Yarn 1) or enableScripts: false (Yarn 2+), then check project and environment overrides." "$id"
+  else
+    skip "$manager: no explicit user script policy; effective defaults unverified" "Defaults differ by version. Inspect the effective policy in a trusted project; the audit does not execute package managers." "$id"
+  fi
+}
+
 section_13_supply_chain() {
   # ═════════════════════════════════════════════════════════════════════════════
   # 13 · Supply Chain (npm / yarn / pnpm)
   # ═════════════════════════════════════════════════════════════════════════════
   section "13 · Supply Chain (npm / yarn / pnpm)"
 
-  # ignore-scripts default — single biggest knob against supply-chain worm attacks.
-  if command -v npm >/dev/null 2>&1; then
-    IGNORE_SCRIPTS=$(npm config get ignore-scripts 2>/dev/null | tail -1 || echo "false")
-    if [[ "$IGNORE_SCRIPTS" == "true" ]]; then
-      pass "npm: ignore-scripts is true (lifecycle scripts disabled by default)" "supply.npm.ignorescripts"
-    else
-      warn "npm: ignore-scripts is false" "npm config set ignore-scripts true" "supply.npm.ignorescripts"
-    fi
-  fi
-  if command -v yarn >/dev/null 2>&1; then
-    YARN_IGN=$(yarn config get ignore-scripts 2>/dev/null | tail -1 || echo "")
-    YARN_BERRY=$(yarn config get enableScripts 2>/dev/null | tail -1 || echo "")
-    if [[ "$YARN_IGN" == "true" ]] || [[ "$YARN_BERRY" == "false" ]]; then
-      pass "yarn: scripts disabled by default" "supply.yarn.ignorescripts"
-    else
-      warn "yarn: install scripts run by default" "yarn config set ignore-scripts true (yarn 1.x) — or set 'enableScripts: false' in .yarnrc.yml (yarn 2+)" "supply.yarn.ignorescripts"
-    fi
-  fi
-  if command -v pnpm >/dev/null 2>&1; then
-    PNPM_IGN=$(pnpm config get ignore-scripts 2>/dev/null | tail -1 || echo "")
-    if [[ "$PNPM_IGN" == "true" ]]; then
-      pass "pnpm: ignore-scripts is true" "supply.pnpm.ignorescripts"
-    else
-      warn "pnpm: ignore-scripts is false" "pnpm config set ignore-scripts true" "supply.pnpm.ignorescripts"
-    fi
-  fi
+  _check_package_script_policy npm
+  _check_package_script_policy yarn
+  _check_package_script_policy pnpm
 
   # Socket.dev CLI (or custom 7-day cooldown wrapper)
   SOCKET_FOUND=false
-  if command -v socket >/dev/null 2>&1; then
-    SOCKET_FOUND=true
-  elif npm ls -g --depth=0 2>/dev/null | grep -q "@socketsecurity/cli\|socket@"; then
+  if _tool_path socket >/dev/null 2>&1; then
     SOCKET_FOUND=true
   fi
 
@@ -3268,8 +3379,7 @@ section_13_supply_chain() {
     fi
     # Inform about a `before=` cooldown if present
     if grep -qE "^[^#]*before\s*=" "$HOME/.npmrc"; then
-      BEFORE_VAL=$(grep -E "^[^#]*before\s*=" "$HOME/.npmrc" | head -1 | sed 's/.*= *//')
-      pass "npm cooldown active: before=${BEFORE_VAL} (.npmrc)" "supply.npmrc.cooldown"
+      skip "npm before setting present in user config" "Check its date and project overrides; its presence alone does not prove a cooldown is active." "supply.npmrc.cooldown"
     fi
   fi
 
@@ -3322,11 +3432,11 @@ section_13_supply_chain() {
         skip "Git credential helper not configured" "Optional: git config --global credential.helper osxkeychain — or go SSH-only by setting url.git@<forge>:.insteadOf https://<forge>/ and pointing remotes at git@" "supply.git.credentialhelper"
       fi
       ;;
-    *osxkeychain* | *manager* | *1password* | *libsecret*)
-      pass "Git credential helper: $GIT_HELPER" "supply.git.credentialhelper"
+    osxkeychain | manager | manager-core | libsecret)
+      pass "Git credential helper uses a recognised credential store" "supply.git.credentialhelper"
       ;;
     *)
-      skip "Git credential helper: $GIT_HELPER" "Verify it's not writing tokens in plaintext to disk." "supply.git.credentialhelper"
+      skip "Custom Git credential helper configured" "Inspect it locally; helper commands can contain credentials and are not included in reports." "supply.git.credentialhelper"
       ;;
     esac
 
@@ -3361,7 +3471,7 @@ section_13_supply_chain() {
       if [[ "$INSTEAD_OTHER" -eq 0 ]]; then
         pass "$INSTEAD_TRUSTED git url.<base>.insteadOf rewrite(s), all targeting trusted SSH forges" "supply.git.insteadof"
       else
-        warn "$INSTEAD_OTHER non-SSH-forge git url.<base>.insteadOf rewrite(s): ${INSTEAD_OTHER_KEYS%; }" "Inspect: git config --global --get-regexp 'url\\..*\\.insteadof'. Rewrites to anything other than github/gitlab/bitbucket SSH endpoints can MITM clones." "supply.git.insteadof"
+        warn "$INSTEAD_OTHER non-SSH-forge git url.<base>.insteadOf rewrite(s)" "Inspect: git config --global --get-regexp 'url\\..*\\.insteadof'. URLs are omitted because they can contain credentials." "supply.git.insteadof"
       fi
     else
       pass "No global git url.insteadOf rewrites" "supply.git.insteadof"
@@ -3380,52 +3490,73 @@ section_13_supply_chain() {
   # Cargo / pip / gem credentials — same shape as the AWS/netrc/npmrc
   # checks in §14 (perm-and-presence), kept here because they belong to
   # package-manager supply chain.
-  for spec in \
-    "$HOME/.cargo/credentials.toml|supply.cargo.creds|cargo" \
-    "$HOME/.cargo/credentials|supply.cargo.creds|cargo" \
-    "$HOME/.pypirc|supply.pypirc.creds|pypirc" \
-    "$HOME/.gem/credentials|supply.gem.creds|gem"; do
-    cred_path="${spec%%|*}"
-    rest="${spec#*|}"
-    cred_id="${rest%%|*}"
-    cred_name="${rest#*|}"
-    [[ -f "$cred_path" ]] || continue
-    PERMS=$(stat -f "%Lp" "$cred_path" 2>/dev/null || echo "?")
-    if [[ "$PERMS" == "600" || "$PERMS" == "400" ]]; then
-      warn "$cred_name credentials at $(redact path "$cred_path") (perms: $PERMS — tight, but plaintext on disk)" "Rotate periodically; prefer environment-injected tokens or platform keychains." "$cred_id"
+  # Cargo may retain both legacy and modern credential files after migration.
+  # Emit one stable row per registry; a loose mode on either file wins.
+  local cred_name cred_id cred_path cred_mode cred_count cred_loose cred_unknown
+  local -a cred_paths=()
+  for cred_name in cargo pypirc gem; do
+    case "$cred_name" in
+    cargo)
+      cred_id="supply.cargo.creds"
+      cred_paths=("$HOME/.cargo/credentials.toml" "$HOME/.cargo/credentials")
+      ;;
+    pypirc)
+      cred_id="supply.pypirc.creds"
+      cred_paths=("$HOME/.pypirc")
+      ;;
+    gem)
+      cred_id="supply.gem.creds"
+      cred_paths=("$HOME/.gem/credentials")
+      ;;
+    esac
+    cred_count=0
+    cred_loose=false
+    cred_unknown=false
+    for cred_path in "${cred_paths[@]}"; do
+      [[ -f "$cred_path" ]] || continue
+      cred_count=$((cred_count + 1))
+      cred_mode=$(stat -f "%Lp" "$cred_path" 2>/dev/null) || cred_mode="?"
+      case "$cred_mode" in
+      600 | 400) ;;
+      *[!0-7]* | '') cred_unknown=true ;;
+      *) cred_loose=true ;;
+      esac
+    done
+    [[ "$cred_count" -gt 0 ]] || continue
+    if $cred_loose; then
+      fail "$cred_name credential file(s) have loose permissions ($cred_count on disk)" "Restrict every credential file to mode 600 or 400, review ACL access, and rotate exposed tokens." "$cred_id"
+    elif $cred_unknown; then
+      warn "$cred_name credential file(s) present; permissions could not be verified ($cred_count on disk)" "Review the file permissions and ACL access manually. Prefer short-lived credentials or platform keychains." "$cred_id"
     else
-      fail "$cred_name credentials at $(redact path "$cred_path") with loose perms ($PERMS)" "chmod 600 $cred_path immediately and rotate the token." "$cred_id"
+      warn "$cred_name credential file(s) on disk ($cred_count; owner-only POSIX modes)" "Plaintext credentials remain readable by local code running as you. Review ACL access and prefer short-lived credentials or platform keychains." "$cred_id"
     fi
   done
 
-  # Homebrew taps and analytics. Non-`homebrew/*` taps execute formula code
-  # from third-party repos on every brew install — worth surfacing. Modern
-  # Homebrew (>=4.0) doesn't list homebrew/core in `brew tap` output by
-  # default (it ships via the Brew API), so an empty result is the
-  # cleanest state and still deserves a PASS row.
-  if command -v brew >/dev/null 2>&1; then
-    BREW_TAPS=$(brew tap 2>/dev/null || true)
-    THIRDPARTY_TAPS=""
-    if [[ -n "$BREW_TAPS" ]]; then
-      THIRDPARTY_TAPS=$(echo "$BREW_TAPS" | grep -vE '^(homebrew/|$)' | paste -sd, -)
-    fi
-    if [[ -n "$THIRDPARTY_TAPS" ]]; then
-      if [[ "$REDACT" == "true" ]]; then
-        TAP_COUNT=$( (printf '%s' "$THIRDPARTY_TAPS" | tr ',' '\n' | grep -c '.') || true)
-        TAP_COUNT=${TAP_COUNT:-0}
-        skip "${TAP_COUNT} third-party Homebrew tap(s) installed" "Each tap can ship formulae that run arbitrary code on install. Trust the tap maintainer." "supply.brew.taps"
-      else
-        skip "Third-party Homebrew taps: $THIRDPARTY_TAPS" "Each tap can ship formulae that run arbitrary code on install. Trust the tap maintainer." "supply.brew.taps"
-      fi
+  # Inventory directories only. Executing brew can load user Ruby code or
+  # write caches. Custom installations are left unverified.
+  if _tool_path brew >/dev/null 2>&1; then
+    local brew_root tap_root tap owner tap_count=0 brew_seen=false
+    local brew_roots=("${BREW_REPOSITORY_ROOTS[@]-/opt/homebrew}" "/usr/local/Homebrew")
+    for brew_root in "${brew_roots[@]}"; do
+      [[ -d "$brew_root/Library" ]] || continue
+      brew_seen=true
+      tap_root="$brew_root/Library/Taps"
+      [[ -d "$tap_root" ]] || continue
+      for owner in "$tap_root"/*; do
+        [[ -d "$owner" && "${owner##*/}" != homebrew ]] || continue
+        for tap in "$owner"/homebrew-*; do
+          [[ -d "$tap" ]] && tap_count=$((tap_count + 1))
+        done
+      done
+    done
+    if ! $brew_seen; then
+      skip "Homebrew tap inventory unavailable for this installation" "Inspect taps manually with brew tap." "supply.brew.taps"
+    elif [[ "$tap_count" -gt 0 ]]; then
+      skip "$tap_count third-party Homebrew tap(s) installed" "Each tap can ship code that runs on install. Verify each maintainer." "supply.brew.taps"
     else
-      pass "No third-party Homebrew taps installed" "supply.brew.taps"
+      pass "No third-party Homebrew taps found in standard repositories" "supply.brew.taps"
     fi
-    BREW_ANALYTICS=$(brew analytics 2>/dev/null | tr -d '\r' | head -1 || echo "")
-    if echo "$BREW_ANALYTICS" | grep -qi "disabled"; then
-      pass "Homebrew analytics disabled" "supply.brew.analytics"
-    elif echo "$BREW_ANALYTICS" | grep -qi "enabled"; then
-      skip "Homebrew analytics enabled" "Optional: brew analytics off (sends anonymized usage to Homebrew)." "supply.brew.analytics"
-    fi
+    skip "Homebrew analytics state not queried" "Check locally with brew analytics; the audit does not execute Homebrew." "supply.brew.analytics"
   fi
 
   _check_supply_direnv
@@ -3453,18 +3584,30 @@ section_13_supply_chain() {
   scanner_state=$(_status_of supply.scanner)
   scanner_open=false
   case "$scanner_state" in warn | fail) scanner_open=true ;; esac
-  # Evidence: how many of npm/yarn/pnpm still run install scripts, and whether a
-  # supply-chain scanner (Socket etc.) is present. Counts/booleans only.
-  scanner_present=false
-  [[ "$scanner_state" == "pass" ]] && scanner_present=true
+  local policy_unknown=false manager policy
+  for manager in npm yarn pnpm; do
+    policy=$(_status_of "supply.$manager.ignorescripts")
+    [[ "$policy" == skip ]] && policy_unknown=true
+  done
+  # Keep the v1.7 count key, with explicit scope: this is the number of known
+  # user-config gaps, not a claim about effective project/environment policy.
   ev_raw managers_running_scripts "$scripts_open"
-  ev_raw scanner_present "$scanner_present"
-  if [[ "$scripts_open" -eq 0 && "$scanner_state" == "pass" ]]; then
-    pass "Supply-chain posture: scripts disabled by default and a scanner is in place" "supply.posture"
-  elif [[ "$scripts_open" -ge 2 ]] && $scanner_open; then
-    fail "Supply-chain posture: $scripts_open package manager(s) run scripts on install AND no scanner present" "Critical exposure to a malicious postinstall. Set ignore-scripts=true on each manager and install Socket CLI; consider a 7-day cooldown wrapper too." "supply.posture"
+  ev policy_scope user_config
+  ev_raw policy_unknown "$policy_unknown"
+  ev_raw effective_policy_verified false
+  case "$scanner_state" in
+  pass) ev_raw scanner_present true ;;
+  warn | fail) ev_raw scanner_present false ;;
+  *) ev scanner_state unknown ;;
+  esac
+  if [[ "$scripts_open" -ge 2 ]] && $scanner_open; then
+    fail "Supply-chain posture: $scripts_open package manager(s) lack a user-config script block AND no scanner was detected" "Review effective install policy, set script blocking, and add a supply-chain scanner. Project and environment overrides remain unverified." "supply.posture"
   elif [[ "$scripts_open" -ge 1 ]] || $scanner_open; then
     warn "Supply-chain posture: gaps in package-manager hygiene" "Address the supply.* warns above as a set — partial coverage leaves the same hole." "supply.posture"
+  elif $policy_unknown; then
+    skip "Supply-chain posture: a package-manager policy is unverified" "Resolve the unverified supply.* checks before treating this posture as complete." "supply.posture"
+  elif [[ "$scanner_state" == "pass" ]]; then
+    pass "Supply-chain posture: no user-config script gaps detected; scanner present (project overrides unverified)" "supply.posture"
   else
     pass "Supply-chain posture: acceptable" "supply.posture"
   fi
@@ -3642,9 +3785,8 @@ section_14_credentials() {
   # Hint about deeper scanning
   # Gitleaks: presence + nudge to actually run it. The §14 grep is a fast
   # triage; gitleaks does deeper pattern matching across the filesystem.
-  if command -v gitleaks >/dev/null 2>&1; then
-    GITLEAKS_VER=$(gitleaks version 2>/dev/null | head -1 | tr -d '\r' | awk '{print $NF}')
-    pass "gitleaks installed${GITLEAKS_VER:+ (v${GITLEAKS_VER#v})} — periodically run: gitleaks detect --no-git -s \$HOME/Dev" "cred.gitleaks.hint"
+  if _tool_path gitleaks >/dev/null 2>&1; then
+    pass "gitleaks executable present — run a separate scan when needed" "cred.gitleaks.hint"
   else
     skip "For a thorough sweep, run: 'brew install gitleaks && gitleaks detect --no-git -s ~/Dev'" "Gitleaks does deeper pattern matching across all files. The check above is a fast-path triage of the most common leak locations." "cred.gitleaks.hint"
   fi
@@ -3693,8 +3835,8 @@ section_15_password_2fa() {
   # SoloKey (FIDO2 token) ships only as a CLI on macOS. There IS no
   # /Applications/Solo.app from the SoloKeys project, and that path collides
   # with a popular DAW — matching it produced false positives.
-  command -v solo2 >/dev/null 2>&1 && HW_2FA_FOUND+=("solo2-cli")
-  command -v solo >/dev/null 2>&1 && HW_2FA_FOUND+=("solo-cli")
+  _tool_path solo2 >/dev/null 2>&1 && HW_2FA_FOUND+=("solo2-cli")
+  _tool_path solo >/dev/null 2>&1 && HW_2FA_FOUND+=("solo-cli")
 
   if [[ ${#HW_2FA_FOUND[@]} -gt 0 ]]; then
     if [[ "$REDACT" == "true" ]]; then
@@ -4201,13 +4343,14 @@ section_20_users_sudo() {
   # label with an empty list. Now: empty list → SKIP (not a false PASS);
   # non-empty list → actual count in the label. The `|| true` neutralises
   # `set -o pipefail` when grep -v filters out everything (legit empty case).
-  ADMIN_LIST=$(dscl . -read /Groups/admin GroupMembership 2>/dev/null | sed 's/GroupMembership: //' | tr ' ' '\n' | grep -v '^_' | grep -v '^root$' | grep -v '^$' | paste -sd, - || true)
-  if [[ -z "$ADMIN_LIST" ]]; then
+  ADMIN_RAW=$(dscl . -read /Groups/admin GroupMembership 2>/dev/null | sed -n 's/^GroupMembership: //p' | tr ' ' '\n' | grep -v '^$' | paste -sd, - || true)
+  if [[ -z "$ADMIN_RAW" ]]; then
     # On some managed / newer macOS installs, dscl may omit GroupMembership
     # even though the admin group is queryable through directory services.
     # Fall back before giving up, but keep the no-false-PASS behavior.
-    ADMIN_LIST=$(dscacheutil -q group -a name admin 2>/dev/null | awk -F': ' '/^users:/ {print $2; exit}' | tr ' ' '\n' | grep -v '^_' | grep -v '^root$' | grep -v '^$' | paste -sd, - || true)
+    ADMIN_RAW=$(dscacheutil -q group -a name admin 2>/dev/null | awk -F': ' '/^users:/ {print $2; exit}' | tr ' ' '\n' | grep -v '^$' | paste -sd, - || true)
   fi
+  ADMIN_LIST=$(printf '%s\n' "$ADMIN_RAW" | tr ',' '\n' | grep -v '^_' | grep -v '^root$' | grep -v '^$' | paste -sd, - || true)
   if [[ -z "$ADMIN_LIST" ]]; then
     skip "Admin group membership could not be parsed" "Verify manually: dscl . -read /Groups/admin GroupMembership" "user.admin.count"
   else
@@ -4222,7 +4365,7 @@ section_20_users_sudo() {
   fi
 
   # Service accounts in admin group (red flag — they shouldn't be admin)
-  SVC_IN_ADMIN=$(echo "$ADMIN_LIST" | tr ',' '\n' | grep -E "^(sys_|com\.|_)|\.nobody$|\.daemon$|\.helper$" | paste -sd, - || true)
+  SVC_IN_ADMIN=$(echo "$ADMIN_RAW" | tr ',' '\n' | grep -E "^(sys_|com\.|_)|\.nobody$|\.daemon$|\.helper$" | paste -sd, - || true)
   if [[ -n "$SVC_IN_ADMIN" ]]; then
     warn "Service accounts present in admin group: $(redact_list user "$SVC_IN_ADMIN")" "Demote with: sudo dseditgroup -o edit -d <user> -t user admin. Investigate which app installed them." "user.admin.svcaccts"
   fi
@@ -4242,14 +4385,36 @@ section_20_users_sudo() {
   fi
 
   # NOPASSWD lines in sudoers (red flag)
-  if ! $QUICK; then
-    if sudo -n grep -rh "NOPASSWD" /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -qv "^#"; then
-      fail "Found NOPASSWD entries in sudoers" "Review: sudo grep -n NOPASSWD /etc/sudoers /etc/sudoers.d/*" "user.sudo.nopasswd"
-    else
-      pass "No NOPASSWD entries in sudoers" "user.sudo.nopasswd"
-    fi
-  fi
+  _check_sudo_nopasswd
 
+}
+
+_check_sudo_nopasswd() {
+  if $QUICK; then
+    skip "Sudoers policy not checked in quick mode" "Run without --quick to attempt a non-interactive privileged read." "user.sudo.nopasswd"
+    return
+  fi
+  local output rc=0
+  # awk succeeds after a complete read even when it finds no matches. grep's
+  # no-match status overlaps sudo's authorization-failure status, so it cannot
+  # distinguish a clean policy from a failed read. Read regular files only:
+  # BSD find -L can silently ignore broken links and directory loops. Print
+  # unexpected input types and symlinks so they leave the policy unverified.
+  # The fixed awk program emits only a finding marker. An empty successful
+  # result is the only safe result; captured diagnostics also prevent a pass.
+  output=$(sudo -n /usr/bin/find -P /etc/sudoers /etc/sudoers.d \
+    \( -path /etc/sudoers ! -type f -o -path /etc/sudoers.d ! -type d \) -print \
+    -o -type f -exec /usr/bin/awk '!/^[[:space:]]*#/ && /NOPASSWD/ { print "AUDIT_NOPASSWD" }' {} + \
+    -o ! -type d -print 2>&1) || rc=$?
+  # A match from a partial read is still evidence of an unsafe entry. A failed
+  # read with no match is not evidence that the policy is safe.
+  if [[ $'\n'"$output"$'\n' == *$'\nAUDIT_NOPASSWD\n'* ]]; then
+    fail "Found NOPASSWD entries in sudoers" "Review the sudoers policy and its included files." "user.sudo.nopasswd"
+  elif [[ "$rc" -eq 0 && -z "$output" ]]; then
+    pass "No active NOPASSWD entries found in the inspected sudoers files" "user.sudo.nopasswd"
+  else
+    skip "Sudoers policy could not be fully verified" "A privileged read failed or a policy input was a symlink or unexpected file type. Review sudoers and included files manually." "user.sudo.nopasswd"
+  fi
 }
 
 section_21_updates_findmy() {
@@ -4258,25 +4423,8 @@ section_21_updates_findmy() {
   # ═════════════════════════════════════════════════════════════════════════════
   section "21 · Software Updates & Find My Mac"
 
-  # Automatic background update checks.
-  # `softwareupdate --schedule` is the canonical source; AutomaticCheckEnabled
-  # is the underlying defaults key the GUI toggle writes. The previous
-  # fallback accepted ANY of six unrelated keys at "1" as evidence that
-  # checks were on — but AutomaticDownload only governs "download once a
-  # check runs", CriticalUpdateInstall is a separate XProtect/MRT path,
-  # AutomaticallyInstallMacOSUpdates is the "install OS updates" toggle, etc.
-  # Each answers a different question; OR'ing them produced a near-tautology
-  # that almost always returned PASS even on systems with auto-checks off.
-  if softwareupdate --schedule 2>/dev/null | grep -qi "Automatic background checks: On"; then
-    pass "Automatic update background checks are on" "update.auto"
-  else
-    ACE=$(defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled 2>/dev/null || echo "")
-    case "$ACE" in
-    1) pass "Automatic update checks on (AutomaticCheckEnabled=1)" "update.auto" ;;
-    0) warn "Automatic update checks are off (AutomaticCheckEnabled=0)" "System Settings → General → Software Update → Automatic Updates → Check for updates: On" "update.auto" ;;
-    *) skip "Automatic update check state unreadable" "Verify: System Settings → General → Software Update → Automatic Updates" "update.auto" ;;
-    esac
-  fi
+  _check_update_auto
+  _check_background_security
 
   # Find My Mac — multi-signal
   FM_SIGNALS=0
@@ -4293,6 +4441,42 @@ section_21_updates_findmy() {
   fi
 
   _check_update_macos_recency
+}
+
+_check_update_auto() {
+  # Automatic background update checks.
+  # `softwareupdate --schedule` is the canonical source; AutomaticCheckEnabled
+  # is the underlying defaults key the GUI toggle writes. The previous
+  # fallback accepted ANY of six unrelated keys at "1" as evidence that
+  # checks were on — but AutomaticDownload only governs "download once a
+  # check runs", CriticalUpdateInstall is a separate XProtect/MRT path,
+  # AutomaticallyInstallMacOSUpdates is the "install OS updates" toggle, etc.
+  # Each answers a different question; OR'ing them produced a near-tautology
+  # that almost always returned PASS even on systems with auto-checks off.
+  # This is a local status query, not a legacy MDM software-update command.
+  # A successful, exact Off result must not be overridden by a stale plist.
+  local schedule="" ace=""
+  schedule=$(softwareupdate --schedule 2>/dev/null) || schedule=""
+  if [[ "$schedule" == "Automatic background checks: On" ]]; then
+    pass "Automatic update background checks are on" "update.auto"
+  elif [[ "$schedule" == "Automatic background checks: Off" ]]; then
+    warn "Automatic update checks are off" "System Settings → General → Software Update → Automatic Updates → Check for updates: On" "update.auto"
+  else
+    ace=$(defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled 2>/dev/null) || ace=""
+    case "$ace" in
+    1) pass "Automatic update checks on (AutomaticCheckEnabled=1)" "update.auto" ;;
+    0) warn "Automatic update checks are off (AutomaticCheckEnabled=0)" "System Settings → General → Software Update → Automatic Updates → Check for updates: On" "update.auto" ;;
+    *) skip "Automatic update check state unreadable" "Verify: System Settings → General → Software Update → Automatic Updates" "update.auto" ;;
+    esac
+  fi
+}
+
+_check_background_security() {
+  # Apple introduced this separate setting in macOS 26.1. Neither the local
+  # update schedule nor an old SoftwareUpdate preference proves its state.
+  # No supported local status interface has been verified for this audit.
+  _macos_at_least 26 1 || return 0
+  skip "Background Security Improvements: automatic installation unverified" "Review System Settings → Privacy & Security → Background Security Improvements → Automatically Install. These updates require built-in startup storage; external startup disks receive them in a later software update." "update.background_security"
 }
 
 _check_update_macos_recency() {
@@ -4501,11 +4685,20 @@ section_22_persistence_tcc() {
     fi
   fi
 
-  # TCC permission holders — only when sudo is available; the databases
-  # themselves are TCC-protected, so the running terminal may need Full Disk
-  # Access. Check BOTH user and system DBs; many sensitive approvals live in
-  # the per-user DB. A partial read is SKIP, never a clean PASS.
-  if $QUICK; then
+  # macOS 27 removes direct TCC database reads. Apple documents tccutil list
+  # for managed devices, but availability/output cannot be assumed on every
+  # 27 installation. Keep these rows unverified until a supported interface
+  # can be validated. On older releases, check both user and system databases.
+  # https://support.apple.com/en-us/148830
+  if ! _macos_at_least 10 0; then
+    skip "TCC permission holders unverified: macOS version is unknown" "Review privacy permissions in System Settings → Privacy & Security. Direct database inspection was not attempted." "tcc.holders"
+    skip "TCC AppleEvents holders unverified: macOS version is unknown" "Review System Settings → Privacy & Security → Automation." "tcc.appleevents"
+    skip "TCC Camera + Microphone holders unverified: macOS version is unknown" "Review System Settings → Privacy & Security → Camera and Microphone." "tcc.camera_microphone"
+  elif _macos_at_least 27 0; then
+    skip "TCC permission holders unverified: direct database access is unavailable on macOS 27+" "Review System Settings → Privacy & Security. On managed Macs, ask the administrator about the supported tccutil list interface; availability must be checked with tccutil --info." "tcc.holders"
+    skip "TCC AppleEvents holders unverified on macOS 27+" "Review System Settings → Privacy & Security → Automation. An unavailable inventory does not mean no apps have permission." "tcc.appleevents"
+    skip "TCC Camera + Microphone holders unverified on macOS 27+" "Review System Settings → Privacy & Security → Camera and Microphone. An unavailable inventory does not mean no apps have permission." "tcc.camera_microphone"
+  elif $QUICK; then
     skip "TCC permission holders (requires sudo)" "" "tcc.holders"
     skip "TCC AppleEvents holders (requires sudo)" "" "tcc.appleevents"
     skip "TCC Camera + Microphone holders (requires sudo)" "" "tcc.camera_microphone"
@@ -4593,7 +4786,9 @@ section_22_persistence_tcc() {
         AE_HOLDERS=$(printf '%s\n' "$TCC_OUT" | awk -F'|' -v s="kTCCServiceAppleEvents" '$2 == s { print $1 ":" $3 }' | paste -sd, -)
         AE_COUNT=$( (printf '%s\n' "$TCC_OUT" | awk -F'|' -v s="kTCCServiceAppleEvents" '$2 == s' | grep -c '.') || true)
         AE_COUNT=${AE_COUNT:-0}
-        if [[ "$AE_COUNT" -eq 0 ]]; then
+        if [[ "$AE_COUNT" -eq 0 && "$TCC_UNREADABLE" -gt 0 ]]; then
+          skip "TCC AppleEvents: inventory incomplete; unreadable scope(s): ${TCC_UNREADABLE_LABELS% }" "Review System Settings → Privacy & Security → Automation. An incomplete inventory does not mean no apps have permission." "tcc.appleevents"
+        elif [[ "$AE_COUNT" -eq 0 ]]; then
           pass "TCC AppleEvents: no approved clients" "tcc.appleevents"
         elif [[ "$REDACT" == "true" ]]; then
           skip "TCC AppleEvents: $AE_COUNT approved client(s)" "Each can drive other apps via Apple Events. Expected for Zoom / Slack / Raycast / IDE automation; review unfamiliar clients in System Settings → Privacy & Security → Automation." "tcc.appleevents"
@@ -4613,7 +4808,9 @@ section_22_persistence_tcc() {
         done
         CM_COUNT=$( (printf '%s\n' "$TCC_OUT" | awk -F'|' '$2 == "kTCCServiceCamera" || $2 == "kTCCServiceMicrophone"' | grep -c '.') || true)
         CM_COUNT=${CM_COUNT:-0}
-        if [[ "$CM_COUNT" -eq 0 ]]; then
+        if [[ "$CM_COUNT" -eq 0 && "$TCC_UNREADABLE" -gt 0 ]]; then
+          skip "TCC Camera + Microphone: inventory incomplete; unreadable scope(s): ${TCC_UNREADABLE_LABELS% }" "Review System Settings → Privacy & Security → Camera and Microphone. An incomplete inventory does not mean no apps have permission." "tcc.camera_microphone"
+        elif [[ "$CM_COUNT" -eq 0 ]]; then
           pass "TCC Camera + Microphone: no approved clients" "tcc.camera_microphone"
         elif [[ "$REDACT" == "true" ]]; then
           skip "TCC Camera + Microphone: $CM_COUNT approved client(s)" "Expected for video conferencing (Zoom / Webex / Teams) and browsers. Review unfamiliar clients in System Settings → Privacy & Security → Camera / Microphone." "tcc.camera_microphone"
@@ -6110,111 +6307,302 @@ run_all_sections() {
 }
 
 _diff_parse_rows() {
-  # Parse with stock macOS JXA/Foundation; stdin is data, never executable code.
-  # Buffer all rows until the complete document and required fields validate.
-  # IDs use JSON string interiors, with spaces escaped, as lossless row tokens:
-  # ordinary check IDs stay unchanged and arbitrary strings cannot split rows.
-  /usr/bin/osascript -l JavaScript -e '
-ObjC.import("Foundation");
-function run(argv) {
-  function invalid(message) {
-    throw new Error("--diff: " + argv[0] + " " + message);
-  }
-  var data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
-  var input = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
-  if (input.isNil()) invalid("JSON must be UTF-8");
-  var text = ObjC.unwrap(input), doc;
-  try {
-    doc = JSON.parse(text);
-  } catch (error) {
-    invalid("malformed JSON");
-  }
-  if (doc === null || typeof doc !== "object" || Array.isArray(doc) ||
-      !Object.prototype.hasOwnProperty.call(doc, "results") ||
-      !Array.isArray(doc.results)) {
-    invalid("JSON must contain a results array");
-  }
-
-  // JSON.parse validates the entire grammar but permits repeated object keys.
-  // Walk its validated tokens to reject ambiguous required fields before using
-  // the decoded document. Unknown additive members retain JSON.parse semantics.
-  var tokens = text.match(/"(?:[^"\\]|\\[\s\S])*"|[{}\[\]:,]|[^\s{}\[\]:,]+/g);
-  var pos = 0;
-  function walk(context) {
-    var token = tokens[pos++], key, seen = Object.create(null);
-    if (token === "{") {
-      while (tokens[pos] !== "}") {
-        key = JSON.parse(tokens[pos++]);
-        pos++; // colon
-        if ((context === "root" && key === "results") ||
-            (context === "row" && (key === "id" || key === "status"))) {
-          if (seen[key]) invalid("duplicate " + context + " member: " + key);
-          seen[key] = true;
+  # _diff_parse_rows SOURCE_NAME
+  # Parse JSON structurally: labels, nested objects, and member order must not
+  # change the comparison. Do not emit partial results from an invalid file.
+  # Limits bound memory, recursion, and comparison work on imported reports.
+  # Stock awk keeps this path usable without Python or developer tools.
+  # Stock awk can silently truncate records at NUL. Map it to another raw
+  # control byte that is also forbidden in JSON before awk reads the input.
+  # This preserves byte counts and cannot alter any valid JSON document.
+  LC_ALL=C tr '\000' '\001' | LC_ALL=C awk -v source="$1" '
+    function bad(message) {
+      failed = 1
+      printf "--diff: %s %s\n", source, message > "/dev/stderr"
+      exit 2
+    }
+    # BWK awk scans a string when taking a substring. Keep cursor reads on
+    # bounded chunks, including when the input is one very long JSON line.
+    # Balanced splitting costs O(n log n), rather than repeatedly slicing an
+    # entire remaining line. No decoded document-sized string is constructed.
+    function add_chunks(text, size,    middle,room) {
+      if (size <= 1024) {
+        room = 1024 - length(pending)
+        if (size < room) pending = pending text
+        else {
+          chunks[++chunk_count] = pending substr(text, 1, room)
+          pending = substr(text, room + 1)
         }
-        walk(context === "root" && key === "results" ? "results" : "other");
-        if (tokens[pos] !== ",") break;
-        pos++;
+        return
       }
-      pos++; // closing brace
-    } else if (token === "[") {
-      while (tokens[pos] !== "]") {
-        walk(context === "results" ? "row" : "other");
-        if (tokens[pos] !== ",") break;
-        pos++;
+      middle = int(size / 2)
+      add_chunks(substr(text, 1, middle), middle)
+      add_chunks(substr(text, middle + 1), size - middle)
+    }
+    function peek() {
+      while (pos > chunk_size && chunk_index <= chunk_count) {
+        delete chunks[chunk_index]
+        chunk = chunks[++chunk_index]
+        chunk_size = length(chunk)
+        pos = 1
       }
-      pos++; // closing bracket
+      return substr(chunk, pos, 1)
     }
-  }
-  walk("root");
-
-  var seen = Object.create(null), rows = [];
-  doc.results.forEach(function (row, index) {
-    var path = "results[" + index + "]";
-    if (row === null || typeof row !== "object" || Array.isArray(row)) {
-      invalid(path + " must be an object");
+    function take(    ch) {
+      ch = peek()
+      pos++
+      return ch
     }
-    if (!Object.prototype.hasOwnProperty.call(row, "id") ||
-        typeof row.id !== "string" || row.id.length === 0) {
-      invalid(path + ".id must be a non-empty string");
+    function ws() {
+      while (peek() ~ /^[ \t\r\n]$/) {
+        match(substr(chunk, pos), /^[ \t\r\n]+/)
+        pos += RLENGTH
+      }
     }
-    if (!Object.prototype.hasOwnProperty.call(row, "status") ||
-        ["pass", "warn", "fail", "skip"].indexOf(row.status) === -1) {
-      invalid(path + ".status must be pass|warn|fail|skip");
+    function count_value() {
+      if (++values > 250000) bad("exceeds the 250000-value limit")
     }
-    if (Object.prototype.hasOwnProperty.call(seen, row.id)) {
-      invalid("has duplicate id: " + JSON.stringify(row.id));
+    function hex4(    h,i,n,c) {
+      h = ""
+      for (i = 1; i <= 4; i++) h = h take()
+      if (length(h) != 4 || h ~ /[^0-9a-fA-F]/) bad("contains an invalid Unicode escape")
+      n = 0
+      for (i = 1; i <= 4; i++) {
+        c = index("0123456789abcdef", tolower(substr(h, i, 1))) - 1
+        n = n * 16 + c
+      }
+      return n
     }
-    seen[row.id] = true;
-    var id = JSON.stringify(row.id).slice(1, -1).replace(/ /g, "\\u0020");
-    rows.push(id + " " + row.status);
-  });
-  if (rows.length) {
-    var output = $(rows.join("\n") + "\n").dataUsingEncoding($.NSUTF8StringEncoding);
-    $.NSFileHandle.fileHandleWithStandardOutput.writeData(output);
-  }
-}
-' "$1" || return 2
-}
-
-_diff_lookup_status() {
-  local rows="$1" ident="$2" row rid status
-  while IFS= read -r row; do
-    [[ -z "$row" ]] && continue
-    rid="${row%% *}"
-    status="${row#* }"
-    if [[ "$rid" == "$ident" ]]; then
-      printf '%s' "$status"
-      return 0
-    fi
-  done < <(printf '%s\n' "$rows")
-  printf ''
+    function utf8(n) {
+      if (n < 128) return sprintf("%c", n)
+      if (n < 2048) return sprintf("%c%c", 192 + int(n / 64), 128 + n % 64)
+      if (n < 65536) return sprintf("%c%c%c", 224 + int(n / 4096), 128 + int(n / 64) % 64, 128 + n % 64)
+      return sprintf("%c%c%c%c", 240 + int(n / 262144), 128 + int(n / 4096) % 64, 128 + int(n / 64) % 64, 128 + n % 64)
+    }
+    function string_value(capture,    out,c,e,n,lo,bytes,point,minimum,b,raw,parts,pieces,step,i) {
+      if (take() != "\"") bad("contains an invalid object key or string")
+      out = ""
+      while ((c = peek()) != "") {
+        # Copy runs of ASCII and valid UTF-8. The byte ranges exclude
+        # overlong encodings, surrogate code points, and values > U+10FFFF.
+        # A sequence split across chunks uses the byte validator below.
+        if (match(substr(chunk, pos), /^([^"\\[:cntrl:]\200-\377]|\177|[\302-\337][\200-\277]|\340[\240-\277][\200-\277]|[\341-\354\356-\357][\200-\277][\200-\277]|\355[\200-\237][\200-\277]|\360[\220-\277][\200-\277][\200-\277]|[\361-\363][\200-\277][\200-\277][\200-\277]|\364[\200-\217][\200-\277][\200-\277])+/)) {
+          if (capture) out = out substr(chunk, pos, RLENGTH)
+          pos += RLENGTH
+          if (capture && length(out) >= 1024) { pieces[++parts] = out; out = "" }
+          continue
+        }
+        # Decode common escapes in bounded runs. Ignored metadata strings
+        # still get strict validation without building a decoded copy.
+        if (match(substr(chunk, pos), /^(\\["\\\/bfnrt])+/)) {
+          if (capture) {
+            raw = substr(chunk, pos, RLENGTH)
+            bytes = length(raw)
+            for (lo = 2; lo <= bytes; lo += 2) out = out escapes[substr(raw, lo, 1)]
+            if (length(out) >= 1024) { pieces[++parts] = out; out = "" }
+          }
+          pos += RLENGTH
+          continue
+        }
+        pos++
+        if (c == "\"") {
+          if (!capture) return ""
+          pieces[++parts] = out
+          # Keys and IDs can be long too. Join decoded fragments in a
+          # balanced tree instead of copying an ever-growing string.
+          for (step = 1; step < parts; step *= 2)
+            for (i = 1; i + step <= parts; i += step * 2) {
+              pieces[i] = pieces[i] pieces[i + step]
+              delete pieces[i + step]
+            }
+          return pieces[1]
+        }
+        n = octets[c]
+        if (n == 0) bad("contains a NUL byte")
+        if (n < 32) bad("contains an unescaped control character")
+        if (n >= 128) {
+          raw = c
+          if (n >= 194 && n <= 223) { bytes = 1; point = n - 192; minimum = 128 }
+          else if (n >= 224 && n <= 239) { bytes = 2; point = n - 224; minimum = 2048 }
+          else if (n >= 240 && n <= 244) { bytes = 3; point = n - 240; minimum = 65536 }
+          else bad("contains invalid UTF-8")
+          for (lo = 0; lo < bytes; lo++) {
+            c = take()
+            b = octets[c]
+            if (b < 128 || b > 191) bad("contains invalid UTF-8")
+            point = point * 64 + b - 128
+            raw = raw c
+          }
+          if (point < minimum || point > 1114111 || (point >= 55296 && point <= 57343)) bad("contains invalid UTF-8")
+          if (capture) out = out raw
+          if (capture && length(out) >= 1024) { pieces[++parts] = out; out = "" }
+          continue
+        }
+        if (c != "\\") {
+          if (capture) out = out c
+          if (capture && length(out) >= 1024) { pieces[++parts] = out; out = "" }
+          continue
+        }
+        e = take()
+        if (e == "\"" || e == "\\" || e == "/") raw = e
+        else if (e == "b") raw = sprintf("%c", 8)
+        else if (e == "f") raw = sprintf("%c", 12)
+        else if (e == "n") raw = "\n"
+        else if (e == "r") raw = "\r"
+        else if (e == "t") raw = "\t"
+        else if (e == "u") {
+          n = hex4()
+          # Stock macOS awk cannot preserve NUL in sprintf. Bash reports
+          # cannot contain it either; reject instead of changing the value.
+          if (n == 0) bad("contains a NUL escape")
+          if (n >= 55296 && n <= 56319) {
+            if (take() != "\\" || take() != "u") bad("contains an unpaired Unicode surrogate")
+            lo = hex4()
+            if (lo < 56320 || lo > 57343) bad("contains an unpaired Unicode surrogate")
+            n = 65536 + (n - 55296) * 1024 + lo - 56320
+          } else if (n >= 56320 && n <= 57343) bad("contains an unpaired Unicode surrogate")
+          raw = utf8(n)
+        } else bad("contains an invalid string escape")
+        if (capture) out = out raw
+        if (capture && length(out) >= 1024) { pieces[++parts] = out; out = "" }
+      }
+      bad("contains an unterminated string")
+    }
+    function object_value(depth, mode,    object,key,ch,id,status,idtype,statustype) {
+      if (mode != "other") count_value()
+      object = ++objects
+      pos++
+      ws()
+      if (peek() != "}") {
+        while (1) {
+          key = string_value(1)
+          if ((object SUBSEP key) in keys) bad("contains a duplicate object member")
+          keys[object, key] = 1
+          ws()
+          if (take() != ":") bad("contains a missing colon")
+          ws()
+          if (mode == "root" && key == "results") {
+            found_results = 1
+            if (peek() != "[") bad("JSON must contain a results array")
+            array_value(depth + 1, "results")
+          } else {
+            value(depth + 1, mode == "row" && (key == "id" || key == "status"))
+            if (mode == "row" && key == "id") { id = scalar; idtype = kind }
+            if (mode == "row" && key == "status") { status = scalar; statustype = kind }
+          }
+          ws()
+          ch = take()
+          if (ch == "}") break
+          if (ch != ",") bad("contains an invalid object separator")
+          ws()
+        }
+      } else pos++
+      if (mode == "row") {
+        if (idtype != "string" || id == "") bad("results[" rows "].id must be a non-empty string")
+        # IDs are emitted as one field per line; reject whitespace/control
+        # injection rather than silently changing an imported identifier.
+        if (id ~ /[[:space:][:cntrl:]]/) bad("results[" rows "].id contains whitespace or control characters")
+        if (statustype != "string" || status !~ /^(pass|warn|fail|skip)$/) bad("results[" rows "].status must be pass|warn|fail|skip")
+        if (id in ids) bad("contains a duplicate result id")
+        ids[id] = 1
+        if (++rows > 10000) bad("exceeds the 10000-result limit")
+        pairs[rows] = id " " status
+      }
+      kind = "object"
+    }
+    function array_value(depth, mode,    ch) {
+      if (depth > 64) bad("exceeds the 64-level nesting limit")
+      if (mode == "results") count_value()
+      pos++
+      ws()
+      if (peek() == "]") { pos++; kind = "array"; return }
+      while (1) {
+        if (mode == "results") {
+          if (peek() != "{") bad("results entries must be objects")
+          object_value(depth + 1, "row")
+        } else value(depth + 1)
+        ws()
+        ch = take()
+        if (ch == "]") break
+        if (ch != ",") bad("contains an invalid array separator")
+        ws()
+      }
+      kind = "array"
+    }
+    function digits(    count) {
+      count = 0
+      while (peek() ~ /^[0-9]$/) {
+        match(substr(chunk, pos), /^[0-9]+/)
+        pos += RLENGTH
+        count += RLENGTH
+      }
+      return count
+    }
+    function value(depth, capture,    ch,literal,i) {
+      if (depth > 64) bad("exceeds the 64-level nesting limit")
+      count_value()
+      ws()
+      ch = peek()
+      scalar = ""
+      if (ch == "{") object_value(depth, "other")
+      else if (ch == "[") array_value(depth, "other")
+      else if (ch == "\"") { scalar = string_value(capture); kind = "string" }
+      else {
+        if (ch == "t" || ch == "f" || ch == "n") {
+          literal = (ch == "t" ? "true" : (ch == "f" ? "false" : "null"))
+          for (i = 1; i <= length(literal); i++)
+            if (take() != substr(literal, i, 1)) bad("contains an invalid JSON value")
+          kind = "literal"
+        } else {
+          if (ch == "-") { pos++; ch = peek() }
+          if (ch == "0") pos++
+          else if (ch ~ /^[1-9]$/) digits()
+          else bad("contains an invalid JSON value")
+          if (peek() == ".") { pos++; if (!digits()) bad("contains an invalid JSON number") }
+          if (peek() ~ /^[eE]$/) {
+            pos++
+            if (peek() ~ /^[+-]$/) pos++
+            if (!digits()) bad("contains an invalid JSON number")
+          }
+          kind = "number"
+        }
+      }
+    }
+    BEGIN {
+      for (i = 1; i < 256; i++) octets[sprintf("%c", i)] = i
+      escapes["\""] = "\""; escapes["\\"] = "\\"; escapes["/"] = "/"
+      escapes["b"] = sprintf("%c", 8); escapes["f"] = sprintf("%c", 12)
+      escapes["n"] = "\n"; escapes["r"] = "\r"; escapes["t"] = "\t"
+    }
+    {
+      line_size = length($0)
+      input_size += line_size + 1
+      if (input_size > 8388608) bad("exceeds the 8 MiB input limit")
+      # Pack short lines too: an 8 MiB file of blank lines must not allocate
+      # one array entry per byte before parsing starts.
+      if (length(pending) + line_size < 1024) pending = pending $0 "\n"
+      else { add_chunks($0, line_size); add_chunks("\n", 1) }
+    }
+    END {
+      if (failed) exit 2
+      if (length(pending)) chunks[++chunk_count] = pending
+      pos = 1
+      ws()
+      if (peek() != "{") bad("JSON must be an object with a results array")
+      object_value(0, "root")
+      ws()
+      if (peek() != "") bad("contains trailing data after the JSON document")
+      if (!found_results) bad("JSON must contain a results array")
+      for (i = 1; i <= rows; i++) print pairs[i]
+    }
+  '
 }
 
 emit_diff() {
   # Compare current run's JSON_ROWS against the JSON file at $DIFF_PATH.
   # Prints one line per change. Exits 0 on no changes, 1 on any change,
-  # 2 on parse error. Runtime uses stock macOS facilities (no python3/jq/node).
-  local current_body prev_pairs curr_pairs ids ident p c marker changes
+  # 2 on parse error. Runtime stays stock-shell only (no python3/jq/node).
+  local current_body prev_pairs curr_pairs ids
   current_body=$(
     IFS=,
     echo "${JSON_ROWS[*]:-}"
@@ -6223,32 +6611,35 @@ emit_diff() {
   curr_pairs=$(printf '{"results":[%s]}' "$current_body" | _diff_parse_rows "current") || exit 2
 
   ids=$(printf '%s\n%s\n' "$prev_pairs" "$curr_pairs" | awk 'NF {print $1}' | sort -u)
-  changes=0
-  while IFS= read -r ident; do
-    [[ -z "$ident" ]] && continue
-    p=$(_diff_lookup_status "$prev_pairs" "$ident")
-    c=$(_diff_lookup_status "$curr_pairs" "$ident")
-    [[ "$p" == "$c" ]] && continue
-    changes=$((changes + 1))
-    if [[ -z "$p" ]]; then
-      printf '+ %s\t(new)        %s\n' "$ident" "$c"
-    elif [[ -z "$c" ]]; then
-      printf -- '- %s\t(removed)    was %s\n' "$ident" "$p"
-    else
-      marker="~"
-      case "$p->$c" in
-      pass-\>warn | pass-\>fail | warn-\>fail | skip-\>warn | skip-\>fail) marker="^" ;;
-      fail-\>warn | fail-\>pass | warn-\>pass | warn-\>skip | fail-\>skip) marker="v" ;;
-      esac
-      printf '%s %s\t%s -> %s\n' "$marker" "$ident" "$p" "$c"
-    fi
-  done < <(printf '%s\n' "$ids")
+  # Compare by indexed maps. A large imported report must not create one
+  # subprocess and one full scan of the maps per check.
+  printf '%s\n' "$prev_pairs" '#CURRENT' "$curr_pairs" '#IDS' "$ids" | awk '
+    mode == 0 && $0 == "#CURRENT" { mode = 1; next }
+    mode == 1 && $0 == "#IDS" { mode = 2; next }
+    NF == 0 { next }
+    mode == 0 { previous[$1] = $2; next }
+    mode == 1 { current[$1] = $2; next }
+    {
+      id = $0; p = previous[id]; c = current[id]
+      if (p == c) next
+      changes++
+      if (p == "") printf "+ %s\t(new)        %s\n", id, c
+      else if (c == "") printf "- %s\t(removed)    was %s\n", id, p
+      else {
+        marker = "~"
+        if (p == "skip" || c == "skip") marker = "?"
+        else if ((p == "pass" && (c == "warn" || c == "fail")) || (p == "warn" && c == "fail")) marker = "^"
+        else if ((p == "fail" && (c == "warn" || c == "pass")) || (p == "warn" && c == "pass")) marker = "v"
+        printf "%s %s\t%s -> %s\n", marker, id, p, c
+      }
+    }
+    END {
+      if (!changes) print "no posture changes"
+      exit (changes ? 1 : 0)
+    }
+  '
+  exit $?
 
-  if [[ "$changes" -eq 0 ]]; then
-    echo "no posture changes"
-    exit 0
-  fi
-  exit 1
 }
 
 # _compute_tiers — tally RANK_* rows into TIER_{URGENT,HIGH,MEDIUM,LOW}_N and
@@ -6259,7 +6650,7 @@ _compute_tiers() {
   TIER_HIGH_N=0
   TIER_MEDIUM_N=0
   TIER_LOW_N=0
-  local i n="${#RANK_ID[@]}" t
+  local i n="${RANK_ID[*]+${#RANK_ID[@]}}" t
   for ((i = 0; i < n; i++)); do
     t=$(_tier_of "${RANK_ID[$i]}" "${RANK_STATUS[$i]}")
     case "$t" in
@@ -6296,7 +6687,7 @@ _verdict_note() {
   esac
   if [[ -z "$note" ]]; then
     case "$OVERALL_PRIORITY" in
-    none) note="No outstanding risks for the $PROFILE profile." ;;
+    none) note="No warnings or failures detected for the $PROFILE profile. Skipped checks remain unverified." ;;
     urgent) note="Address the urgent item(s) first — these are the configurations most likely to be exploited." ;;
     high) note="Several profile-relevant gaps remain — work the high-priority items first." ;;
     *) note="Mostly optional hardening remains." ;;
@@ -6310,7 +6701,7 @@ _verdict_note() {
 # warn/fail rows exist. Ordered urgent→high→medium→low, stable within tier.
 _build_top_risks_json() {
   [[ "$TOP_N" -eq 0 ]] && return
-  local n="${#RANK_ID[@]}" shown=0 tier idx t out="" eid elabel ehint eff
+  local n="${RANK_ID[*]+${#RANK_ID[@]}}" shown=0 tier idx t out="" eid elabel ehint eff
   for tier in urgent high medium low; do
     for ((idx = 0; idx < n; idx++)); do
       t=$(_tier_of "${RANK_ID[$idx]}" "${RANK_STATUS[$idx]}")
@@ -6337,11 +6728,11 @@ emit_decision_layer() {
   # after the flat Summary counts, never replacing them. (JSON mode surfaces
   # the same data via top-level executive_verdict / top_risks fields.)
   _compute_tiers
-  local n="${#RANK_ID[@]}"
+  local n="${RANK_ID[*]+${#RANK_ID[@]}}"
 
   local baseline
   if [[ "$FAIL_N" -eq 0 ]]; then
-    baseline="Strong baseline: $PASS_N pass, 0 fail."
+    baseline="No failures detected: $PASS_N pass, $WARN_N warn, $SKIP_N skip. Skipped checks remain unverified."
   else
     baseline="$PASS_N pass, $FAIL_N fail."
   fi
@@ -6393,8 +6784,17 @@ _status_rank() {
 # _md_cell STR — make a string safe inside a Markdown table cell.
 _md_cell() {
   local s="$1"
-  s=${s//|/\\|}
-  s=${s//$'\n'/ }
+  s=$(_terminal_text "$s")
+  s=${s//&/\&amp;}
+  s=${s//</\&lt;}
+  s=${s//>/\&gt;}
+  s=${s//\\/\&#92;}
+  s=${s//|/\&#124;}
+  s=${s//\`/\&#96;}
+  s=${s//\[/\&#91;}
+  s=${s//\]/\&#93;}
+  s=${s//\*/\&#42;}
+  s=${s//_/\&#95;}
   printf '%s' "$s"
 }
 
@@ -6403,7 +6803,7 @@ _md_cell() {
 # --snapshot write a complete JSON document even from a text-mode run.
 _build_json_document() {
   local JSON_BODY="" JSON_HOST JSON_MACOS JSON_ARCH JSON_VERDICT JSON_TOPRISKS JSON_TOTAL
-  local i n="${#ROW_ID[@]}" eid el eh
+  local i n="${ROW_ID[*]+${#ROW_ID[@]}}" eid el eh
   for ((i = 0; i < n; i++)); do
     eid=$(_json_escape "${ROW_ID[$i]}")
     el=$(_json_escape "${ROW_LABEL[$i]}")
@@ -6438,40 +6838,80 @@ _build_json_document() {
 # local history dir. This is the ONE write the tool performs, gated on
 # --snapshot (which forces --redact), to the tool's own data dir — never to
 # system or user configuration. The default run remains fully read-only.
-maybe_write_snapshot() {
-  [[ "${SNAPSHOT:-false}" == "true" ]] || return 0
-  local dir file stem attempt=0 rc REDACT=true
+maybe_write_snapshot() (
+  ${SNAPSHOT:-false} || return 0
+  if [[ "$EUID" -eq 0 || "${REDACT:-false}" != true ]]; then
+    printf '%s\n' 'mac-posture-audit: snapshots require a normal user and --redact' >&2
+    return 2
+  fi
+  umask 077
+  local dir file stamp attempt
   dir="${MSA_HISTORY_DIR:-$HOME/.mac-posture-audit/history}"
-  mkdir -p "$dir" 2>/dev/null || {
-    printf 'mac-posture-audit: could not create snapshot dir %s\n' "$dir" >&2
-    return 0
+  _snapshot_enter_directory "$dir" || {
+    printf '%s\n' 'mac-posture-audit: snapshot directory must be private (0700), owned by you, and free of user symlinks' >&2
+    return 2
   }
-  stem="$dir/posture-$(date +%Y%m%d-%H%M%S)"
-  file="$stem.json"
-  # "_" sorts after the original ".json"; padding preserves numeric order.
-  # Bound the suffix so it never outgrows that ordering.
-  while [[ "$attempt" -le 999999 ]]; do
-    rc=0
-    (
-      set -C
-      [[ ! -e "$file" && ! -L "$file" ]] || exit 3
-      # Reserve and retain the descriptor: never reopen a claimed pathname.
-      exec 3>"$file" || exit 3
-      [[ -f /dev/fd/3 ]] || exit 1
-      _build_json_document >&3 || exit 1
-    ) 2>/dev/null || rc=$?
-    case "$rc" in
-    0)
-      printf 'Snapshot written: %s\n' "$file" >&2
-      return 0
-      ;;
-    3) [[ -e "$file" || -L "$file" ]] || break ;;
-    *) break ;;
-    esac
-    attempt=$((attempt + 1))
-    printf -v file '%s_%06d.json' "$stem" "$attempt"
+  # Retain the legacy local-time prefix. The sequence sorts after older names
+  # without a suffix and preserves creation order for same-second snapshots.
+  stamp=$(date +%Y%m%d-%H%M%S) || return 2
+  set -C
+  for ((attempt = 1; attempt <= 1000; attempt++)); do
+    printf -v file 'posture-%s_%04d.json' "$stamp" "$attempt"
+    [[ -e "$file" || -L "$file" ]] && continue
+    # Open once, exclusively, in the checked directory. No truncation, and the
+    # FD remains attached to this file if an ancestor directory is renamed.
+    if { exec 9>"$file"; } 2>/dev/null; then
+      if _build_json_document >&9; then
+        printf 'Snapshot written: %s/%s\n' "$(_terminal_text "$dir")" "$file" >&2
+        return 0
+      fi
+      printf '%s\n' 'mac-posture-audit: snapshot write failed; the file may be incomplete' >&2
+      return 2
+    fi
   done
-  printf 'mac-posture-audit: could not write snapshot %s\n' "$file" >&2
+  printf '%s\n' 'mac-posture-audit: could not create a new snapshot' >&2
+  return 2
+)
+
+# Walk from the root using directory-relative operations, never mkdir -p
+# through an unchecked symlink. macOS /var and /tmp are root-owned system
+# aliases. Other symlinks, foreign owners, and writable non-sticky parents are
+# rejected. A private leaf also prevents another account racing file creation.
+_snapshot_enter_directory() {
+  local requested="$1" component owner="" mode="" rest acl walked=""
+  [[ "$requested" == /* ]] || return 2
+  cd -P / || return 2
+  rest="${requested#/}"
+  while [[ -n "$rest" ]]; do
+    component="${rest%%/*}"
+    if [[ "$rest" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    case "$component" in '' | . | ..) return 2 ;; esac
+    walked="$walked/$component"
+    if [[ -L "$component" ]]; then
+      case "$walked" in /var | /tmp) ;; *) return 2 ;; esac
+      [[ "$(stat -f '%u' "$component" 2>/dev/null)" == 0 ]] || return 2
+    fi
+    if [[ ! -e "$component" ]]; then
+      mkdir -m 700 "$component" 2>/dev/null || return 2
+    fi
+    [[ -d "$component" ]] || return 2
+    # An explicit relative path bypasses the caller's CDPATH and its stdout.
+    cd -P -- "./$component" || return 2
+    owner=$(stat -f '%u' .) || return 2
+    mode=$(stat -f '%Lp' .) || return 2
+    [[ "$owner" == "$EUID" || "$owner" == 0 ]] || return 2
+    case "$mode" in *[!0-7]* | '') return 2 ;; esac
+    # Writable shared directories must have the sticky bit (e.g. /private/tmp).
+    if (((8#$mode & 0022) != 0 && (8#$mode & 01000) == 0)); then return 2; fi
+  done
+  [[ "$owner" == "$EUID" && "$mode" == 700 ]] || return 2
+  acl=$(ls -lde . 2>/dev/null) || return 2
+  # ACL grants can bypass mode 0700 and can be inherited by new files. Do not
+  # modify existing ACLs; reject such a location before writing any report.
+  if printf '%s\n' "$acl" | grep -qE '^[[:space:]]*[0-9]+:.* allow '; then
+    return 2
+  fi
+  return 0
 }
 
 # emit_markdown_report — v1.4 --report md: a shareable Markdown report
@@ -6483,13 +6923,13 @@ emit_markdown_report() {
   host=$(redact host "$(hostname)")
   total=$((PASS_N + WARN_N + FAIL_N + SKIP_N))
   printf '# macOS Posture Audit\n\n'
-  printf -- '- **Host:** `%s`\n' "$host"
-  printf -- '- **macOS:** `%s` · **Arch:** `%s` · **Profile:** `%s`\n' "$MACOS_VER" "$ARCH" "$PROFILE"
+  printf -- '- **Host:** %s\n' "$(_md_cell "$host")"
+  printf -- '- **macOS:** %s · **Arch:** %s · **Profile:** %s\n' "$(_md_cell "$MACOS_VER")" "$(_md_cell "$ARCH")" "$PROFILE"
   printf -- '- **Summary:** %d pass · %d warn · %d fail · %d skip (%d total)\n\n' "$PASS_N" "$WARN_N" "$FAIL_N" "$SKIP_N" "$total"
 
   printf '## Executive Verdict\n\n'
   if [[ "$FAIL_N" -eq 0 ]]; then
-    printf 'Strong baseline: %d pass, 0 fail.\n\n' "$PASS_N"
+    printf 'No failures detected: %d pass, %d warn, %d skip. Skipped checks remain unverified.\n\n' "$PASS_N" "$WARN_N" "$SKIP_N"
   else
     printf '%d pass, %d fail.\n\n' "$PASS_N" "$FAIL_N"
   fi
@@ -6497,11 +6937,11 @@ emit_markdown_report() {
   printf '**Action priority: %s**\n\n' "$OVERALL_PRIORITY"
 
   printf '## Top risks to address\n\n'
-  if [[ "$TOP_N" -ne 0 && ${#RANK_ID[@]} -gt 0 ]]; then
+  if [[ "$TOP_N" -ne 0 && ${RANK_ID[*]+${#RANK_ID[@]}} -gt 0 ]]; then
     printf '| # | tier | effort | id | finding |\n|---|------|--------|----|---------|\n'
     local shown=0 tier idx t
     for tier in urgent high medium low; do
-      for ((idx = 0; idx < ${#RANK_ID[@]}; idx++)); do
+      for ((idx = 0; idx < ${RANK_ID[*]+${#RANK_ID[@]}}; idx++)); do
         t=$(_tier_of "${RANK_ID[$idx]}" "${RANK_STATUS[$idx]}")
         [[ "$t" == "$tier" ]] || continue
         shown=$((shown + 1))
@@ -6511,13 +6951,15 @@ emit_markdown_report() {
       done
     done
     printf '\n'
+  elif [[ ${RANK_ID[*]+${#RANK_ID[@]}} -gt 0 ]]; then
+    printf '_Top risks hidden by --top 0. Review all checks below._\n\n'
   else
     printf '_No warnings or failures._\n\n'
   fi
 
   printf '## All checks\n\n'
-  printf '| status | id | finding |\n|--------|----|---------|\n'
-  n="${#ROW_ID[@]}"
+  printf '| status | id | finding | action |\n|--------|----|---------|--------|\n'
+  n="${ROW_ID[*]+${#ROW_ID[@]}}"
   for ((i = 0; i < n; i++)); do
     st="${ROW_STATUS[$i]}"
     case "$st" in
@@ -6527,7 +6969,7 @@ emit_markdown_report() {
     *) icon="SKIP" ;;
     esac
     cell=$(_md_cell "${ROW_LABEL[$i]}")
-    printf '| %s | `%s` | %s |\n' "$icon" "${ROW_ID[$i]}" "$cell"
+    printf '| %s | %s | %s | %s |\n' "$icon" "$(_md_cell "${ROW_ID[$i]}")" "$cell" "$(_md_cell "${ROW_HINT[$i]}")"
   done
   printf '\n---\n_Generated by mac-posture-audit %s · profile `%s` · read-only._\n' "$SCRIPT_VERSION" "$PROFILE"
 }
@@ -6536,51 +6978,61 @@ emit_markdown_report() {
 # Compares the oldest and newest snapshot in the history dir and reports which
 # checks improved or regressed. No scan, no writes. Exits.
 run_trend() {
-  local dir files n first last
+  local dir file n first last oldmap newmap ids out
+  local LC_ALL=C
+  local -a files=()
   dir="${MSA_HISTORY_DIR:-$HOME/.mac-posture-audit/history}"
   if [[ ! -d "$dir" ]]; then
-    printf 'No snapshot history at %s — create snapshots with --snapshot first.\n' "$dir"
+    printf 'No snapshot history at %s — create snapshots with --snapshot first.\n' "$(_terminal_text "$dir")"
     exit 0
   fi
-  # Byte ordering keeps ".json" before padded collision suffixes in every locale.
-  files=$(find "$dir" -maxdepth 1 -name 'posture-*.json' -type f 2>/dev/null | LC_ALL=C sort)
-  n=$(printf '%s' "$files" | grep -c . || true)
-  [[ -z "$n" ]] && n=0
+  # A shell array preserves spaces and newlines in a user-selected history
+  # path. Glob order follows snapshot timestamps. Ignore symlinks and devices.
+  for file in "$dir"/posture-*.json; do
+    [[ -f "$file" && ! -L "$file" ]] && files+=("$file")
+  done
+  n="${files[*]+${#files[@]}}"
+  n=${n:-0}
   if [[ "$n" -lt 2 ]]; then
-    printf 'Need at least 2 snapshots in %s for a trend (found %d).\n' "$dir" "$n"
+    printf 'Need at least 2 snapshots in %s for a trend (found %d).\n' "$(_terminal_text "$dir")" "$n"
     exit 0
   fi
-  first=$(printf '%s\n' "$files" | head -1)
-  last=$(printf '%s\n' "$files" | tail -1)
-  # Capture and check both complete parses before any comparison or verdict.
-  local oldrows newrows oldrc=0 newrc=0
-  oldrows=$(_diff_parse_rows oldest <"$first") || oldrc=$?
-  newrows=$(_diff_parse_rows newest <"$last") || newrc=$?
-  [[ "$oldrc" -eq 0 && "$newrc" -eq 0 ]] || exit 2
+  first="${files[0]}"
+  last="${files[$((n - 1))]}"
+  # Check both parser exit codes before showing any conclusion. Process
+  # substitution would hide failures and could falsely report no changes.
+  oldmap=$(_diff_parse_rows oldest <"$first") || exit 2
+  newmap=$(_diff_parse_rows newest <"$last") || exit 2
+  ids=$(printf '%s\n%s\n' "$oldmap" "$newmap" | awk 'NF {print $1}' | LC_ALL=C sort -u)
+  out=$(printf '%s\n' "$oldmap" '#CURRENT' "$newmap" '#IDS' "$ids" | awk '
+    mode == 0 && $0 == "#CURRENT" { mode = 1; next }
+    mode == 1 && $0 == "#IDS" { mode = 2; next }
+    NF == 0 { next }
+    mode == 0 { previous[$1] = $2; next }
+    mode == 1 { current[$1] = $2; next }
+    {
+      id = $0; p = previous[id]; c = current[id]
+      if (p == c) next
+      if (p == "") { added++; line = "  added      " id ": " c }
+      else if (c == "") { removed++; line = "  removed    " id ": was " p }
+      else if (p == "skip" || c == "skip") {
+        coverage++; line = "  coverage   " id ": " p " -> " c
+      } else if ((p == "fail" && (c == "warn" || c == "pass")) || (p == "warn" && c == "pass")) {
+        improved++; line = "  improved   " id ": " p " -> " c
+      } else { regressed++; line = "  regressed  " id ": " p " -> " c }
+      details = details line "\n"
+    }
+    END {
+      printf "Improved: %d   Regressed: %d   Coverage changes: %d   Added: %d   Removed: %d\n", improved, regressed, coverage, added, removed
+      if (details != "") printf "\n%s", details
+      else print "\nNo status changes between oldest and newest snapshot."
+    }
+  ') || exit 2
 
-  printf 'Posture trend — %d snapshots in %s\n' "$n" "$dir"
-  printf '  oldest: %s\n  newest: %s\n\n' "$(basename "$first")" "$(basename "$last")"
+  printf 'Posture trend — %d snapshots in %s\n' "$n" "$(_terminal_text "$dir")"
+  printf '  oldest: %s\n  newest: %s\n\n' "$(_terminal_text "${first##*/}")" "$(_terminal_text "${last##*/}")"
+  printf '%s\n' "$out"
 
-  local id st oldst improved=0 regressed=0 out=""
-  while read -r id st; do
-    [[ -z "$id" ]] && continue
-    oldst=$(_diff_lookup_status "$oldrows" "$id")
-    [[ -z "$oldst" || "$oldst" == "$st" ]] && continue
-    if [[ "$(_status_rank "$st")" -lt "$(_status_rank "$oldst")" ]]; then
-      improved=$((improved + 1))
-      out="${out}  improved   $id: $oldst -> $st"$'\n'
-    else
-      regressed=$((regressed + 1))
-      out="${out}  regressed  $id: $oldst -> $st"$'\n'
-    fi
-  done < <(printf '%s\n' "$newrows")
-
-  printf 'Improved: %d   Regressed: %d\n' "$improved" "$regressed"
-  if [[ -n "$out" ]]; then
-    printf '\n%s' "$out"
-  else
-    printf '\nNo status changes between oldest and newest snapshot.\n'
-  fi
   exit 0
 }
 
@@ -6596,13 +7048,13 @@ emit_summary() {
   # branch since --report md forces MODE=json internally.
   if [[ -n "${REPORT_FORMAT:-}" ]]; then
     emit_markdown_report
-    maybe_write_snapshot
+    maybe_write_snapshot || exit 2
     [[ "$FAIL_N" -gt 0 ]] && exit 1 || exit 0
   fi
 
   if [[ "$MODE" == "json" ]]; then
     _build_json_document
-    maybe_write_snapshot
+    maybe_write_snapshot || exit 2
     ${SUMMARY_LINE:-false} && _emit_summary_line
     [[ "$FAIL_N" -gt 0 ]] && exit 1 || exit 0
   fi
@@ -6619,7 +7071,7 @@ emit_summary() {
   echo
   printf "%sDone. Re-run after each change to track progress.%s\n" "$DIM" "$NC"
   ${SUMMARY_LINE:-false} && _emit_summary_line
-  maybe_write_snapshot
+  maybe_write_snapshot || exit 2
 
   [[ "$FAIL_N" -gt 0 ]] && exit 1 || exit 0
 }
@@ -6947,7 +7399,7 @@ run_profile_auto() {
   for app in "Visual Studio Code.app" "Cursor.app" "Windsurf.app" "Zed.app"; do
     for r in "${app_roots[@]}"; do [[ -d "$r/$app" ]] && dev=true; done
   done
-  for bin in npm cargo go pnpm yarn; do command -v "$bin" >/dev/null 2>&1 && dev=true; done
+  for bin in npm cargo go pnpm yarn; do _tool_path "$bin" >/dev/null 2>&1 && dev=true; done
   for app in "Ledger Live.app" "Trezor Suite.app" "Keystone.app" "Frame.app"; do
     for r in "${app_roots[@]}"; do [[ -d "$r/$app" ]] && web3=true; done
   done
@@ -6980,7 +7432,17 @@ run_profile_auto() {
 }
 
 main() {
+  AUDIT_INVENTORY_PATH="$PATH"
+  # System probes must not resolve to project-local wrappers. The two standard
+  # package prefixes are used only after Apple tools, for the opt-in gh probe.
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
+  unset CDPATH
+  export PATH LC_ALL=C
   parse_args "$@"
+  if [[ "$EUID" -eq 0 ]]; then
+    printf '%s\n' 'Run this audit as your normal user. Privileged probes use sudo -n when available.' >&2
+    exit 2
+  fi
   if $SELFTEST; then
     init_colors
     run_selftest

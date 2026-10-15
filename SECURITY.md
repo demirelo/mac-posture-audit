@@ -1,96 +1,117 @@
 # Security Policy
 
-## Read-Only Guarantee
+## Read-only probes and explicit report writes
 
-`mac-posture-audit.sh` is an audit script only. It must not create, modify, delete,
-install, unload, enable, disable, or reconfigure any file, service, package,
-profile, account, keychain, browser, network setting, macOS setting, or security
-control.
+Default scans inspect configuration without changing files, packages, accounts,
+services, or security settings. They do not install tools or apply remediation.
 
-The script only performs read-style probes such as `defaults read`, `plutil -p`,
-`launchctl list`, `profiles -L/list`, `tmutil destinationinfo/latestbackup`,
-`git config --global`, `brew tap` with no tap name, process checks, and filesystem
-metadata/listing checks.
+There are two explicit report-write operations:
 
-## Network Behavior
+- `--snapshot` creates report storage and saves redacted JSON. It requires a
+  normal user, a private directory owned by that user, and a new filename.
+  Directory mode is `0700`; file mode is `0600`. User-controlled symlinks,
+  writable non-sticky ancestors, and access-granting directory ACLs are rejected.
+  It does not fix an existing directory's permissions or overwrite reports.
+- The separate Python companion's `--output FILE` creates a new HTML report with
+  mode `0600`. It rejects an existing path, including a symlink. On macOS it
+  removes inherited ACLs through the newly opened file descriptor before it
+  writes report data. A failure to remove the ACL stops the write.
 
-Default mode is offline. The script must not contact external services unless the
-user explicitly passes `--network`.
+An interrupted or failed write can leave a new, incomplete file. Report-write
+errors exit `2`. Invalid snapshots also make trend comparison exit `2`.
 
-The only allowed `--network` probes are:
+## Command execution
 
-- `https://test.nextdns.io` for live NextDNS routing verification.
-- `gh auth status` for GitHub CLI authentication status, if `gh` is installed.
+Run `./mac-posture-audit.sh` as your normal user. Running the whole audit as root
+is rejected. Checks that need more access use non-interactive `sudo -n`; the
+audit does not ask for a password. A failed probe must not become a safe result.
 
-Both are read-only. They do not install, write, or change configuration.
+Direct execution uses `/bin/bash -p`. This prevents Bash startup files and
+exported functions from loading. The audit prioritizes system command paths.
+Optional-tool inventory can inspect the caller's PATH without executing those
+tools. The script does not execute npm, Yarn, pnpm, Homebrew, or Gitleaks.
+Package-policy checks inspect user configuration only. Project configuration,
+environment overrides, and package-manager version differences remain outside
+that verification.
 
-## Privileged Checks
+The installed GitHub CLI remains executable code trusted by the optional
+network check. These controls do not protect against a compromised operating
+system, a malicious same-user process, or an altered audit script. If you run
+`bash script` instead of executing the file directly, the calling interpreter's
+startup behavior is outside the script's control.
 
-Privileged probes use non-interactive `sudo -n` and skip cleanly when sudo is not
-already available. The script does not ask for a password itself and does not
-change sudoers, users, groups, services, or settings.
+## Network behavior
 
-Running `sudo ./mac-posture-audit.sh` is optional and provides fuller read-only
-visibility. Even under sudo, the script preserves the invoking user's home
-directory for user-scope checks instead of auditing `/var/root`.
+Default mode is offline. `--network` permits only:
 
-## Narrow Read-Only Exceptions
+- The HTTPS `https://test.nextdns.io` routing probe, with a five-second timeout,
+  HTTPS-only protocol selection, and curl startup configuration disabled.
+- `gh auth status`, if the GitHub CLI is installed.
 
-Two commands are allowed only in tightly constrained read-only forms:
+These probes request status only. System and CLI logs or caches remain outside
+the script's control.
 
-- `sqlite3` is allowed only when `-readonly` is the first sqlite3 argument. This
-  is used to inspect `TCC.db`.
-- `osascript` is allowed only for the exact login-items query used by Section 22:
-  `tell application "System Events" to get the name of every login item`.
+## Constrained native probes
 
-## Enforcement
+- On macOS versions before 27, SQLite uses `-readonly -init /dev/null` to inspect
+  TCC tables. Startup files, shell commands, extension loading, and output
+  commands are not permitted.
+- On macOS 27+, Apple has removed direct TCC database access. The audit skips
+  these inventories without running SQLite, `sudo`, or `tccutil` for them.
+  Unknown versions also skip this path. Review permissions in System Settings;
+  unavailable data does not mean no permissions exist. See
+  [Apple's enterprise changes](https://support.apple.com/en-us/148830) and the
+  [macOS 27 coverage notes](docs/macOS-27.md).
+- AppleScript is limited to the fixed System Events login-item query. macOS may
+  require Automation permission. A denied query produces an unverified result.
 
-The guarantee is enforced in CI by `scripts/check-read-only.sh`. The checker
-rejects command-position uses of mutating or risky commands such as `rm`,
-`chmod`, `defaults write`, `plutil -replace`, mutating `launchctl`, package
-installs, kill commands, disk tooling, `curl | bash`, writable `sqlite3`, and
-mutating `osascript`.
+## Report handling
 
-The tripwire also has positive and negative fixtures under
-`tests/check-read-only/`; CI fails if a mutating fixture is accepted or a
-read-only fixture is rejected.
+Reports describe sensitive aspects of a device. Redaction reduces identifying
+information; it is not a guarantee of anonymity. Review a report before sharing.
+Git helper commands and rewrite URLs are omitted because they can contain
+credentials. Do not paste unredacted reports into public issues.
 
-## How To Verify Before Running
+The HTML companion validates structure and counts, escapes displayed values,
+and uses a restrictive content security policy without external assets.
+Markdown cells escape markup from probe values. Terminal findings escape
+control characters. JSON comparison rejects malformed or excessive input,
+duplicate keys and IDs, and unsafe check identifiers.
+
+## Enforcement and limits
+
+`scripts/check-read-only.sh` is a static tripwire. It checks known command forms,
+exact probe arguments, and local network guards. Positive and negative fixtures
+cover accepted forms and known bypasses. It is not a complete shell parser or
+a sandbox. Passing it does not prove that arbitrary shell code, redirections,
+or embedded programs are safe. Runtime checks, code review, and tests are also
+required.
 
 ```bash
 less mac-posture-audit.sh
-bash -n mac-posture-audit.sh
+/bin/bash -n mac-posture-audit.sh
 ./scripts/check-read-only.sh
-for f in tests/check-read-only/should_fail/*.sh; do
-  ./scripts/check-read-only.sh "$f" >/dev/null 2>&1 && echo "MISS: $f"
-done
+./scripts/test.sh
 shasum -a 256 mac-posture-audit.sh
 ```
 
-## Practical Limits
+The test runner uses a temporary home directory for Bats. Some integration tests
+still perform real read-only macOS probes in quick mode.
 
-Like any command execution, the user's shell, Terminal, macOS, `sudo`, Homebrew,
-or GitHub CLI may create normal logs, history entries, telemetry, or caches
-outside this script's control. This repository's guarantee is that
-`mac-posture-audit.sh` itself does not intentionally mutate files, settings,
-services, packages, accounts, or security controls.
+Release validation uses read-only permissions. Publication uses the tested
+commit and verifies the tag still resolves to it. Manual dispatch must select
+the same version tag. Existing release assets cannot be replaced by the workflow.
+Local tests do not establish that a hosted release workflow has run successfully.
 
-If you find a command that violates this guarantee, treat it as a security bug.
+## Reporting a vulnerability
 
-## Reporting A Vulnerability
-
-Email `omer[_]progfi[_]xyz` (replace the first `[_]` with `@` and the second with
-`.`). Please do not open public issues for sensitive findings.
+Use [GitHub private vulnerability reporting](https://github.com/demirelo/mac-posture-audit/security/advisories/new),
+or email `omer[_]progfi[_]xyz` (replace the first `[_]` with `@` and the second
+with `.`). Do not open public issues for sensitive findings.
 
 Expected acknowledgement: within 7 days.
 
-## Scope
-
-In scope: any command in `mac-posture-audit.sh` or `scripts/check-read-only.sh`
-that mutates state, exfiltrates data outside documented opt-in probes, weakens
-the read-only tripwire, or misclassifies a security control in a way that gives a
-false sense of safety.
-
-Out of scope: false negatives caused by macOS version drift, undocumented private
-APIs, tools the script does not yet check, or normal OS/runtime logging outside
-the script's control.
+In scope: unintended mutation, command execution, data disclosure, report
+injection, unsafe report writes, weakened safety checks, and false safe results.
+Include the macOS version, check ID, and a minimal fixture when possible. Do not
+include private configuration or credentials.

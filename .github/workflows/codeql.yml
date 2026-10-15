@@ -3,15 +3,15 @@ name: CodeQL
 # Static analysis on the Python surface in this repo (the opt-in
 # tools/render_report.py renderer and the small test-suite Python helpers).
 # The audit script itself is bash 3.2 — covered by shellcheck + the read-only
-# tripwire + tripwire negative fixtures in the Safety workflow. CodeQL exists
-# here primarily for the OpenSSF Scorecard SAST signal and for any future
-# Python additions.
+# tripwire + tripwire negative fixtures in the Safety workflow. Scan every PR
+# to main, every main push, and weekly for newly added security queries.
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
   schedule:
     # Weekly re-scan, slightly offset from the Scorecard schedule.
     - cron: '0 6 * * 1'
@@ -23,6 +23,7 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       actions: read
       contents: read
@@ -34,6 +35,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4

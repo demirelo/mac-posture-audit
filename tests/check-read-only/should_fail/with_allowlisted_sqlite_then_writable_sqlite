@@ -1,0 +1,3 @@
+# Tripwire input only. Never run this file.
+exit 0
+sqlite3 -readonly -init /dev/null /tmp/never.db "SELECT 1"; sqlite3 /tmp/never.db "DELETE FROM data"

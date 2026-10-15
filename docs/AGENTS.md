@@ -16,17 +16,31 @@ The script that produces the data is deliberately *under-opinionated*. It emits 
 
 The script is deliberate about three things:
 
-- **Read-only.** Every check is a probe. There's a CI tripwire that fails if a mutating command sneaks into the source. The narrow allowlists (sqlite3 `-readonly`, `osascript ... to get`, bare `brew tap`, NextDNS curl, `gh auth status`) are tested on every commit.
+- **Read-only.** Every check is a probe. CI tests a static tripwire for known command forms. The narrow allowlists are SQLite `-readonly -init /dev/null` before macOS 27, the fixed `osascript` login-item query, NextDNS curl, and `gh auth status`. The last two require `--network`. Package-manager and Homebrew probes read configuration or inventory without executing those tools. See [SECURITY.md](../SECURITY.md) for the enforcement limits.
 - **Stable IDs over labels.** Treat `id` as the stable contract. Labels and hints will be reworded between versions; IDs won't.
-- **Status semantics.** `pass` = a measurable security control is in the desired state. `fail` = a hard control is in the *wrong* state (FileVault off, plaintext PAT in shell rc, Internet Sharing on, NOPASSWD sudoers, world-readable AWS credentials). `warn` = a recommendation that a typical user would benefit from. `skip` = informational, or "couldn't determine without more privilege/network." Profiles can rewrite a status (`warn → fail` for `web3` on `ext.wallet`) but never lower a `fail`.
+- **Status semantics.** `pass` = a measurable security control is in the desired state. `fail` = a hard control is in the *wrong* state (FileVault off, plaintext PAT in shell rc, Internet Sharing on, NOPASSWD sudoers, world-readable AWS credentials). `warn` = a recommendation that a typical user would benefit from. `skip` = informational or unverified, including unavailable access, network, or platform support. Read the label and hint; a skipped inventory does not prove that the inventory is empty. Profiles can rewrite a status (`warn → fail` for `web3` on `ext.wallet`) but never lower a `fail`.
 
 What the audit deliberately does NOT do:
 
 - It does not aggregate. There is no overall "score." Rows are independent.
 - It does not encode strong opinions about debatable choices. Lockdown Mode for non-targeted users, single-vs-multi-user for crypto, native macOS Keychain vs 1Password — the audit either marks these as informational SKIPs or hedges in the hint.
-- It does not phone home. Default mode never makes a network call. `--network` adds exactly one allowlisted probe.
+- It does not phone home. Default mode never makes a network call. `--network` permits the NextDNS routing probe and GitHub CLI authentication status.
 
 That last bullet is why this guide exists. The audit gives you the raw observations; you're responsible for the contextual recommendation.
+
+### macOS version limits
+
+On macOS 27 or later, `tcc.holders`, `tcc.appleevents`, and
+`tcc.camera_microphone` skip direct database inspection. Unknown or malformed OS
+versions also skip these probes. Use the manual permission-review steps in the
+report; do not suggest root execution or Full Disk Access as a way to restore
+this audit path. The audit does not run `tccutil list` automatically.
+
+On macOS 26.1 or later, `update.background_security` asks for manual review of
+the separate Background Security Improvements setting. Other update checks do
+not verify that setting. Apple Intelligence and Siri settings also need manual
+review when relevant to the user's data-sharing policy. See the
+[macOS 27 coverage notes](macOS-27.md) for sources and test limits.
 
 ## 2. The threat-model lenses
 
@@ -154,10 +168,15 @@ When this fires alongside any of the `data.*.cloud_sync_exposure` checks, do not
 `apps.remote_access.present` is the ClickFake / "fake interview" pattern's first move: attacker tricks the target into installing AnyDesk / TeamViewer "for a screen-share interview," gets them to grant Accessibility + Screen Recording, then drains wallets via the browser extension. The audit reports the three components as separate rows:
 
 - `apps.remote_access.present` (warn / fail under `web3` + `paranoid`) — is the tool installed at all?
-- `tcc.holders` (skip with sensitive-service breakdown) — have any clients been granted Accessibility / Screen Recording?
+- `tcc.holders` — a successful legacy inventory can report approved sensitive-service clients. On macOS 27+, or when access is unavailable, it reports an unverified inventory instead.
 - `ext.wallet` (warn / fail under `web3` + `paranoid`) — is there a wallet extension on the same machine?
 
-When all three fire together, the user has the exact configuration the attack relies on. Recommend: uninstall the remote-access app, revoke its TCC grants explicitly (System Settings → Privacy & Security → Accessibility + Screen Recording), then audit `ext.wallet` for any extension you didn't install yourself in the last 24 hours.
+The installed app and wallet rows alone do not prove that the remote-access app
+has sensitive permissions. Require evidence that the grants belong to that app;
+a TCC `skip` is not that evidence. Ask the user to review Accessibility and
+screen-recording permissions when the inventory is unavailable. If the app and
+its grants are unexpected, recommend removing the app, revoking its permissions,
+and reviewing wallet extensions.
 
 ### 3.13 Cloud-sync exfiltration → `data.ssh.cloud_sync_exposure` + `data.crypto.cloud_sync_exposure` + `data.dotfiles.cloud_sync_exposure`
 
@@ -310,3 +329,9 @@ Output modes for a reviewer (v1.4+): `--report md` (shareable Markdown), `tools/
 - A list of fixes for every possible Mac. Threat models vary; surface findings, don't broadcast a checklist.
 - A replacement for the audit's hints. Hints are the script's most generic guidance; this guide is for layering on top.
 - A static document. As patterns prove useful in practice, add them to §3. Pull requests welcome.
+
+## Security boundaries for report review
+
+Run the audit as a normal user. Whole-script root execution is rejected; individual probes use `sudo -n`. Package managers, Homebrew, and Gitleaks are not executed by the audit. Package-policy rows describe user configuration only; project and environment overrides remain unverified.
+
+Do not treat `skip`, absent rows, or malformed history as evidence of safety. Trend output reports coverage changes separately. `--top 0` hides the risk list; it does not clear findings. Stored reports remain sensitive after redaction. The safety checker is a static tripwire, not proof that arbitrary shell code is safe.
